@@ -622,6 +622,18 @@ def _run_git_readonly_bytes(repo_root: Path, git_args: list[str]) -> tuple[int, 
             "-c",
             "protocol.allow=never",
             "-c",
+            "protocol.file.allow=never",
+            "-c",
+            "protocol.ext.allow=never",
+            "-c",
+            "protocol.ssh.allow=never",
+            "-c",
+            "protocol.http.allow=never",
+            "-c",
+            "protocol.https.allow=never",
+            "-c",
+            "protocol.git.allow=never",
+            "-c",
             "core.sshCommand=false",
             "-C",
             str(repo_root),
@@ -670,7 +682,7 @@ def _is_partial_or_promisor_repo(repo_root: Path) -> bool:
             has_val = False
         key_l = key.strip().lower()
         val_l = val.strip().lower()
-        if key_l == "extensions.partialclone" and (not has_val or val_l != ""):
+        if key_l == "extensions.partialclone":
             return True
         if key_l.startswith("remote.") and key_l.endswith(".promisor"):
             if not has_val or val_l not in {"false", "0", "no", "off", ""}:

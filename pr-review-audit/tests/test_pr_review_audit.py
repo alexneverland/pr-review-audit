@@ -1421,6 +1421,79 @@ class TestAuditScenarios(unittest.TestCase):
                     ctx["warnings"],
                 )
 
+    def test_repo_dir_blocks_whitespace_partialclone_remote_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            repo_dir = tmp_dir / "repo"
+            upstream_dir = tmp_dir / "upstream"
+            _init_git_repo(upstream_dir, {"src/verify.py": "COMMITTED\n"})
+            head_sha = _init_git_repo(repo_dir, {"src/verify.py": "COMMITTED\n"})
+            blob_oid = _git(repo_dir, "rev-parse", f"{head_sha}:src/verify.py")
+
+            marker_file = tmp_dir / "ws_pwned.txt"
+            uploadpack_script = tmp_dir / "evil_ws_uploadpack.py"
+            uploadpack_script.write_text(
+                "import pathlib\n"
+                f"pathlib.Path({marker_file.as_posix()!r}).write_text('pwned', encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            uploadpack_cmd = f'"{Path(sys.executable).as_posix()}" "{uploadpack_script.as_posix()}"'
+            _git(repo_dir, "config", "core.repositoryformatversion", "1")
+            _git(repo_dir, "config", "extensions.partialclone", " ")
+            _git(repo_dir, "config", "protocol.file.allow", "always")
+            _git(repo_dir, "config", "remote. .url", upstream_dir.as_posix())
+            _git(repo_dir, "config", "remote. .promisor", "true")
+            _git(repo_dir, "config", "remote. .uploadpack", uploadpack_cmd)
+
+            obj_path = repo_dir / ".git" / "objects" / blob_oid[:2] / blob_oid[2:]
+            os.chmod(obj_path, 0o644)
+            obj_path.unlink()
+
+            pr_data = {
+                "schema_version": "1.0",
+                "pr": {
+                    "host": "github.com",
+                    "owner": "acme",
+                    "repo": "app",
+                    "number": 14,
+                    "url": "https://github.com/acme/app/pull/14",
+                    "title": "Whitespace partialclone safety",
+                    "state": "OPEN",
+                    "head_sha": head_sha,
+                },
+                "commits": [{"sha": head_sha, "short_sha": head_sha[:7]}],
+                "files": [{"filename": "src/verify.py", "status": "modified", "changes": 1, "patch": "+x"}],
+                "review_items": [
+                    {
+                        "id": "T_WS_PARTIAL",
+                        "source_type": "review_thread",
+                        "url": "https://github.com/acme/app/pull/14#r1",
+                        "author": "rev",
+                        "path": "src/verify.py",
+                        "line": 1,
+                        "original_line": 1,
+                        "commit_sha": head_sha,
+                        "original_commit_sha": head_sha,
+                        "is_resolved": False,
+                        "is_outdated": False,
+                        "diff_hunk": "",
+                        "comments": [{"body": "Check"}],
+                        "metadata_warnings": [],
+                    }
+                ],
+                "warnings": [],
+            }
+
+            with mock.patch.object(compare, "_git_supports_no_lazy_fetch", return_value=False):
+                self.assertTrue(compare._is_partial_or_promisor_repo(repo_dir))
+                ctx = compare.build_audit_context(pr_data, repo_dir=repo_dir)
+                self.assertFalse(marker_file.exists(), "Whitespace partialclone must not trigger uploadpack.")
+                self.assertIsNone(ctx["items"][0]["current_code_excerpt"])
+                self.assertIn(
+                    "repo_dir_partial_clone_unsupported_without_no_lazy_fetch",
+                    ctx["warnings"],
+                )
+
     def test_partially_fixed_without_evidence_or_refs_downgraded_to_uncertain(self) -> None:
         context = {
             "pr": {
