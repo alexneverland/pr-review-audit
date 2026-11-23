@@ -105,7 +105,9 @@ def validate_and_normalize_findings(
 
         status = raw_status
         guardrail_notes: list[str] = []
-        if status in {"FIXED", "STILL_PRESENT"} and (not evidence or not code_references):
+        if status in {"FIXED", "STILL_PRESENT", "PARTIALLY_FIXED"} and (
+            not evidence or not code_references
+        ):
             missing_parts = []
             if not evidence:
                 missing_parts.append("evidence")

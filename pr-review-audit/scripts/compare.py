@@ -12,6 +12,7 @@ import base64
 import json
 from pathlib import Path, PurePosixPath
 import re
+import subprocess
 import sys
 from typing import Any
 from urllib.parse import quote
@@ -591,7 +592,72 @@ def _fetch_file_via_gh(
         return None
 
 
-def _read_local_repo_file(repo_root: Path, rel_path: str, warnings: list[str]) -> str | None:
+def _run_git_readonly(repo_root: Path, git_args: list[str]) -> tuple[int, str, str]:
+    """Run a read-only `git` command inside `repo_root` without invoking a shell."""
+    cmd = ["git", "-c", "core.fsmonitor=false", "-C", str(repo_root), *git_args]
+    try:
+        completed = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            shell=False,
+            check=False,
+        )
+    except OSError as exc:
+        return 1, "", str(exc)
+    return completed.returncode, completed.stdout, completed.stderr
+
+
+def _verify_local_repo_head(
+    repo_root: Path,
+    head_sha: str | None,
+    warnings: list[str],
+) -> bool:
+    """Verify `--repo-dir` is a Git repository root checked out at PR HEAD."""
+    if not head_sha or not _SHA_RE.fullmatch(str(head_sha)):
+        warnings.append("repo_dir_skipped_missing_pr_head_sha")
+        return False
+
+    rc, stdout, _ = _run_git_readonly(repo_root, ["rev-parse", "--is-inside-work-tree"])
+    if rc != 0 or stdout.strip().lower() != "true":
+        warnings.append("repo_dir_not_a_git_repository")
+        return False
+
+    rc_top, stdout_top, _ = _run_git_readonly(repo_root, ["rev-parse", "--show-toplevel"])
+    if rc_top != 0 or not stdout_top.strip():
+        warnings.append("repo_dir_not_a_git_repository")
+        return False
+    try:
+        if Path(stdout_top.strip()).resolve() != repo_root:
+            warnings.append("repo_dir_not_git_root")
+            return False
+    except OSError:
+        warnings.append("repo_dir_not_a_git_repository")
+        return False
+
+    rc_head, stdout_head, _ = _run_git_readonly(repo_root, ["rev-parse", "HEAD"])
+    local_head = stdout_head.strip().lower()
+    if rc_head != 0 or not _SHA_RE.fullmatch(local_head):
+        warnings.append("repo_dir_missing_head_commit")
+        return False
+
+    pr_head = str(head_sha).strip().lower()
+    if not (local_head == pr_head or local_head.startswith(pr_head)):
+        warnings.append(f"repo_dir_head_mismatch: local={local_head[:7]} pr={pr_head[:7]}")
+        return False
+
+    return True
+
+
+def _read_local_repo_file(
+    repo_root: Path,
+    rel_path: str,
+    warnings: list[str],
+    *,
+    check_clean: bool = True,
+) -> str | None:
     clean_path = _validate_rel_posix_path(rel_path)
     if clean_path is None:
         warnings.append(f"skipped_unsafe_local_path: {rel_path!r}")
@@ -600,6 +666,16 @@ def _read_local_repo_file(repo_root: Path, rel_path: str, warnings: list[str]) -
     if not candidate.is_relative_to(repo_root):
         warnings.append(f"blocked_path_traversal: {rel_path!r}")
         return None
+    if check_clean:
+        rc, stdout, _ = _run_git_readonly(
+            repo_root, ["status", "--porcelain", "--", clean_path]
+        )
+        if rc != 0:
+            warnings.append(f"repo_dir_status_check_failed ({clean_path})")
+            return None
+        if stdout.strip():
+            warnings.append(f"repo_dir_dirty_file ({clean_path})")
+            return None
     if not candidate.is_file():
         return None
     try:
@@ -669,14 +745,6 @@ def build_audit_context(
         for sha, data in fetched.items():
             resolved_compare.setdefault(sha, data)
 
-    if repo_dir is not None:
-        repo_root = repo_dir.resolve(strict=True)
-        for path in _collect_target_paths(pr_data, rename_map):
-            if path not in resolved_contents:
-                text = _read_local_repo_file(repo_root, path, warnings)
-                if text is not None:
-                    resolved_contents[path] = text
-
     if fetch_files:
         pr = pr_data.get("pr") or {}
         host = pr.get("host") or "github.com"
@@ -689,6 +757,16 @@ def build_audit_context(
                     text = _fetch_file_via_gh(
                         client, str(host), str(owner), str(repo), str(head_sha), path, warnings
                     )
+                    if text is not None:
+                        resolved_contents[path] = text
+
+    if repo_dir is not None:
+        repo_root = repo_dir.resolve(strict=True)
+        head_sha = (pr_data.get("pr") or {}).get("head_sha")
+        if _verify_local_repo_head(repo_root, head_sha, warnings):
+            for path in _collect_target_paths(pr_data, rename_map):
+                if path not in resolved_contents:
+                    text = _read_local_repo_file(repo_root, path, warnings)
                     if text is not None:
                         resolved_contents[path] = text
 

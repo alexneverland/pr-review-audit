@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -21,6 +22,32 @@ import report  # noqa: E402
 
 def _b64(text: str) -> str:
     return base64.b64encode(text.encode("utf-8")).decode("ascii")
+
+
+def _git(repo_dir: Path, *args: str) -> str:
+    proc = subprocess.run(
+        ["git", "-c", "core.fsmonitor=false", "-C", str(repo_dir), *args],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        shell=False,
+        check=True,
+    )
+    return proc.stdout.strip()
+
+
+def _init_git_repo(repo_dir: Path, files: dict[str, str]) -> str:
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    _git(repo_dir, "init")
+    _git(repo_dir, "config", "user.name", "Test User")
+    _git(repo_dir, "config", "user.email", "test@example.com")
+    for rel_path, content in files.items():
+        target = repo_dir / rel_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    _git(repo_dir, "add", ".")
+    _git(repo_dir, "commit", "-m", "Initial fixture commit")
+    return _git(repo_dir, "rev-parse", "HEAD")
 
 
 class MockGhRouter:
@@ -814,10 +841,9 @@ class TestAuditScenarios(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
             repo_dir = tmp_dir / "repo"
-            (repo_dir / "src").mkdir(parents=True)
-            (repo_dir / "src" / "verify.py").write_text(
-                "def check(a, b):\n    return a == b  # still buggy\n",
-                encoding="utf-8",
+            head_sha = _init_git_repo(
+                repo_dir,
+                {"src/verify.py": "def check(a, b):\n    return a == b  # still buggy\n"},
             )
 
             collected_path = tmp_dir / "collected.json"
@@ -835,9 +861,9 @@ class TestAuditScenarios(unittest.TestCase):
                             "state": "OPEN",
                             "base_ref": "main",
                             "head_ref": "fix/auth",
-                            "head_sha": "aaa1111",
+                            "head_sha": head_sha,
                         },
-                        "commits": [{"sha": "aaa1111", "short_sha": "aaa1111"}],
+                        "commits": [{"sha": head_sha, "short_sha": head_sha[:7]}],
                         "files": [
                             {
                                 "filename": "src/verify.py",
@@ -855,8 +881,8 @@ class TestAuditScenarios(unittest.TestCase):
                                 "path": "src/verify.py",
                                 "line": 2,
                                 "original_line": 2,
-                                "commit_sha": "aaa1111",
-                                "original_commit_sha": "aaa1111",
+                                "commit_sha": head_sha,
+                                "original_commit_sha": head_sha,
                                 "is_resolved": True,
                                 "is_outdated": False,
                                 "resolved_by": "author",
@@ -971,6 +997,190 @@ class TestAuditScenarios(unittest.TestCase):
         context = compare.build_audit_context(collected, fetch_diffs=True, runner=router)
         self.assertEqual(context["items"][0]["freshness"]["status"], "OLDER_AFFECTED")
         self.assertEqual(context["items"][0]["freshness"]["commits_behind"], 1)
+
+    def test_repo_dir_rejects_non_git_directory_and_fetch_files_takes_precedence(self) -> None:
+        head_sha = "1234567890abcdef1234567890abcdef12345678"
+        pr_data = {
+            "schema_version": "1.0",
+            "pr": {
+                "host": "github.com",
+                "owner": "acme",
+                "repo": "app",
+                "number": 7,
+                "url": "https://github.com/acme/app/pull/7",
+                "title": "Repo dir guard",
+                "state": "OPEN",
+                "head_sha": head_sha,
+            },
+            "commits": [{"sha": head_sha, "short_sha": head_sha[:7]}],
+            "files": [{"filename": "src/verify.py", "status": "modified", "changes": 1, "patch": "+pass"}],
+            "review_items": [
+                {
+                    "id": "T_NONGIT",
+                    "source_type": "review_thread",
+                    "url": "https://github.com/acme/app/pull/7#r1",
+                    "author": "rev",
+                    "path": "src/verify.py",
+                    "line": 1,
+                    "original_line": 1,
+                    "commit_sha": head_sha,
+                    "original_commit_sha": head_sha,
+                    "is_resolved": False,
+                    "is_outdated": False,
+                    "diff_hunk": "",
+                    "comments": [{"body": "Check verify.py"}],
+                    "metadata_warnings": [],
+                }
+            ],
+            "warnings": [],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            plain_dir = Path(tmp) / "plain"
+            (plain_dir / "src").mkdir(parents=True)
+            (plain_dir / "src" / "verify.py").write_text("LOCAL_FORGED_CONTENT\n", encoding="utf-8")
+
+            # Non-git directory alone must be rejected
+            ctx_plain = compare.build_audit_context(pr_data, repo_dir=plain_dir)
+            self.assertIn("repo_dir_not_a_git_repository", ctx_plain["warnings"])
+            self.assertIsNone(ctx_plain["items"][0]["current_code_excerpt"])
+
+            # With --fetch-files enabled, GitHub HEAD content wins even if --repo-dir is also passed
+            router = MockGhRouter()
+            gh_src = "GITHUB_HEAD_CONTENT\n"
+            router.on_rest(
+                f"repos/acme/app/contents/src/verify.py?ref={head_sha}",
+                {"type": "file", "encoding": "base64", "size": len(gh_src), "content": _b64(gh_src)},
+            )
+            ctx_both = compare.build_audit_context(
+                pr_data, fetch_files=True, repo_dir=plain_dir, runner=router
+            )
+            snippet = ctx_both["items"][0]["current_code_excerpt"]["snippet"]
+            self.assertIn("GITHUB_HEAD_CONTENT", snippet)
+            self.assertNotIn("LOCAL_FORGED_CONTENT", snippet)
+
+    def test_repo_dir_rejects_head_mismatch_and_dirty_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp) / "repo"
+            local_head = _init_git_repo(
+                repo_dir,
+                {"src/verify.py": "CLEAN_COMMITTED_LINE\n"},
+            )
+            other_sha = "ffffffffffffffffffffffffffffffffffffffff"
+            base_pr = {
+                "schema_version": "1.0",
+                "pr": {
+                    "host": "github.com",
+                    "owner": "acme",
+                    "repo": "app",
+                    "number": 8,
+                    "url": "https://github.com/acme/app/pull/8",
+                    "title": "HEAD mismatch & dirty file",
+                    "state": "OPEN",
+                    "head_sha": other_sha,
+                },
+                "commits": [{"sha": other_sha, "short_sha": other_sha[:7]}],
+                "files": [{"filename": "src/verify.py", "status": "modified", "changes": 1, "patch": "+x"}],
+                "review_items": [
+                    {
+                        "id": "T_MISMATCH",
+                        "source_type": "review_thread",
+                        "url": "https://github.com/acme/app/pull/8#r1",
+                        "author": "rev",
+                        "path": "src/verify.py",
+                        "line": 1,
+                        "original_line": 1,
+                        "commit_sha": other_sha,
+                        "original_commit_sha": other_sha,
+                        "is_resolved": False,
+                        "is_outdated": False,
+                        "diff_hunk": "",
+                        "comments": [{"body": "Check"}],
+                        "metadata_warnings": [],
+                    }
+                ],
+                "warnings": [],
+            }
+
+            # Mismatched HEAD SHA must be rejected
+            ctx_mismatch = compare.build_audit_context(base_pr, repo_dir=repo_dir)
+            self.assertTrue(any(w.startswith("repo_dir_head_mismatch:") for w in ctx_mismatch["warnings"]))
+            self.assertIsNone(ctx_mismatch["items"][0]["current_code_excerpt"])
+
+            # Matching HEAD SHA but dirty working-tree modification must be rejected
+            base_pr["pr"]["head_sha"] = local_head
+            base_pr["commits"] = [{"sha": local_head, "short_sha": local_head[:7]}]
+            base_pr["review_items"][0]["commit_sha"] = local_head
+            base_pr["review_items"][0]["original_commit_sha"] = local_head
+            (repo_dir / "src" / "verify.py").write_text("DIRTY_UNCOMMITTED_EDIT\n", encoding="utf-8")
+
+            ctx_dirty = compare.build_audit_context(base_pr, repo_dir=repo_dir)
+            self.assertIn("repo_dir_dirty_file (src/verify.py)", ctx_dirty["warnings"])
+            self.assertIsNone(ctx_dirty["items"][0]["current_code_excerpt"])
+
+    def test_partially_fixed_without_evidence_or_refs_downgraded_to_uncertain(self) -> None:
+        context = {
+            "pr": {
+                "owner": "acme",
+                "repo": "app",
+                "number": 42,
+                "url": "https://github.com/acme/app/pull/42",
+                "head_sha": "abc1234",
+                "title": "Partial guardrail",
+            },
+            "items": [
+                {
+                    "id": "T_P1",
+                    "source_type": "review_thread",
+                    "url": "https://github.com/acme/app/pull/42#r1",
+                    "author": "reviewer",
+                    "path": "src/cache.py",
+                    "is_resolved": True,
+                    "is_outdated": False,
+                    "freshness": {"status": "CURRENT", "reason": "Current."},
+                    "location": {"status": "modified", "original_path": "src/cache.py", "current_path": "src/cache.py"},
+                },
+                {
+                    "id": "T_P2",
+                    "source_type": "review_thread",
+                    "url": "https://github.com/acme/app/pull/42#r2",
+                    "author": "reviewer",
+                    "path": "src/auth.py",
+                    "is_resolved": True,
+                    "is_outdated": False,
+                    "freshness": {"status": "CURRENT", "reason": "Current."},
+                    "location": {"status": "modified", "original_path": "src/auth.py", "current_path": "src/auth.py"},
+                },
+            ],
+            "warnings": [],
+        }
+
+        md = report.render_markdown_report(
+            context,
+            {
+                "findings": [
+                    {
+                        "item_id": "T_P1",
+                        "status": "PARTIALLY_FIXED",
+                        "issue_summary": "Add TTL and hash check.",
+                        "evidence": "TTL added.",
+                        "code_references": [],
+                    },
+                    {
+                        "item_id": "T_P2",
+                        "status": "PARTIALLY_FIXED",
+                        "issue_summary": "Check null token.",
+                        "evidence": "",
+                        "code_references": ["src/auth.py:10"],
+                    },
+                ]
+            },
+        )
+        self.assertIn("| `UNCERTAIN` | 2 |", md)
+        self.assertIn("| `PARTIALLY_FIXED` | 0 |", md)
+        self.assertIn("Guardrail downgrade: PARTIALLY_FIXED finding for T_P1 lacked code_references", md)
+        self.assertIn("Guardrail downgrade: PARTIALLY_FIXED finding for T_P2 lacked evidence", md)
+        self.assertNotIn("WARNING — Resolved Threads Still Unfixed", md)
 
 
 if __name__ == "__main__":

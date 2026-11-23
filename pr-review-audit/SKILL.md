@@ -43,7 +43,7 @@ Run `compare.py` to compute review freshness against `HEAD`, track renamed/delet
 python "<SKILL_DIR>/scripts/compare.py" "<WORK_DIR>/collected.json" --fetch-diffs --fetch-files --output "<WORK_DIR>/audit-context.json"
 ```
 
-- If auditing from an already checked-out local clone at `HEAD`, you may also pass `--repo-dir "<LOCAL_REPO_PATH>"` (read-only lookup with path-traversal protection).
+- If auditing from an already checked-out local clone at `HEAD`, you may also pass `--repo-dir "<LOCAL_REPO_PATH>"` (read-only lookup with path-traversal protection; requires a clean Git checkout matching PR `HEAD`, with `--fetch-files` taking precedence).
 - Review `warnings` in `audit-context.json` for missing patches, truncated diffs, or missing metadata.
 
 ### Step 3: Perform Semantic Verification
@@ -85,7 +85,7 @@ python "<SKILL_DIR>/scripts/compare.py" "<WORK_DIR>/collected.json" --fetch-diff
 
 ### Step 4: Validate and Render the Audit Report
 
-Run `report.py` to enforce evidence guardrails (any `FIXED` or `STILL_PRESENT` missing `evidence` or `code_references` is downgraded to `UNCERTAIN`), sanitize untrusted Markdown/HTML, highlight resolved-but-unfixed findings, and render the final report:
+Run `report.py` to enforce evidence guardrails (any `FIXED`, `STILL_PRESENT`, or `PARTIALLY_FIXED` finding missing `evidence` or `code_references` is downgraded to `UNCERTAIN`), sanitize untrusted Markdown/HTML, highlight resolved-but-unfixed findings, and render the final report:
 
 ```bash
 python "<SKILL_DIR>/scripts/report.py" --context "<WORK_DIR>/audit-context.json" --findings "<WORK_DIR>/findings.json" --output "<WORK_DIR>/report.md"
