@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import os
 from pathlib import Path, PurePosixPath
 import re
 import subprocess
@@ -592,22 +593,42 @@ def _fetch_file_via_gh(
         return None
 
 
-def _run_git_readonly(repo_root: Path, git_args: list[str]) -> tuple[int, str, str]:
-    """Run a read-only `git` command inside `repo_root` without invoking a shell."""
-    cmd = ["git", "-c", "core.fsmonitor=false", "-C", str(repo_root), *git_args]
+def _run_git_readonly_bytes(repo_root: Path, git_args: list[str]) -> tuple[int, bytes, bytes]:
+    """Run a read-only `git` command inside `repo_root` without filters, lazy fetch, or replace refs."""
+    cmd = [
+        "git",
+        "--no-lazy-fetch",
+        "--no-replace-objects",
+        "-c",
+        "core.fsmonitor=false",
+        "-C",
+        str(repo_root),
+        *git_args,
+    ]
+    env = os.environ.copy()
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
+    env["GIT_TERMINAL_PROMPT"] = "0"
     try:
         completed = subprocess.run(
             cmd,
             capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
+            env=env,
             shell=False,
             check=False,
         )
     except OSError as exc:
-        return 1, "", str(exc)
+        return 1, b"", str(exc).encode("utf-8", errors="replace")
     return completed.returncode, completed.stdout, completed.stderr
+
+
+def _run_git_readonly(repo_root: Path, git_args: list[str]) -> tuple[int, str, str]:
+    """Run a read-only `git` command and decode UTF-8 text output."""
+    rc, stdout, stderr = _run_git_readonly_bytes(repo_root, git_args)
+    return (
+        rc,
+        stdout.decode("utf-8", errors="replace"),
+        stderr.decode("utf-8", errors="replace"),
+    )
 
 
 def _verify_local_repo_head(
@@ -669,7 +690,10 @@ def _read_local_repo_file(
     rc_tree, stdout_tree, _ = _run_git_readonly(
         repo_root, ["ls-tree", "HEAD", "--", clean_path]
     )
-    if rc_tree != 0 or not stdout_tree.strip():
+    if rc_tree != 0:
+        warnings.append(f"local_file_unreadable ({clean_path}): failed to inspect HEAD tree.")
+        return None
+    if not stdout_tree.strip():
         return None
 
     line = stdout_tree.splitlines()[0].strip()
@@ -701,22 +725,17 @@ def _read_local_repo_file(
         )
         return None
 
-    cmd = ["git", "-c", "core.fsmonitor=false", "-C", str(repo_root), "cat-file", "blob", oid]
-    try:
-        completed = subprocess.run(cmd, capture_output=True, shell=False, check=False)
-    except OSError as exc:
-        warnings.append(f"local_file_unreadable ({clean_path}): {exc}")
-        return None
-    if completed.returncode != 0:
+    rc_blob, stdout_blob, _ = _run_git_readonly_bytes(repo_root, ["cat-file", "blob", oid])
+    if rc_blob != 0:
         warnings.append(f"local_file_unreadable ({clean_path}): git cat-file failed.")
         return None
-    if len(completed.stdout) > MAX_FILE_BYTES:
+    if len(stdout_blob) > MAX_FILE_BYTES:
         warnings.append(
-            f"local_file_too_large ({clean_path}): {len(completed.stdout)} bytes exceeds {MAX_FILE_BYTES}."
+            f"local_file_too_large ({clean_path}): {len(stdout_blob)} bytes exceeds {MAX_FILE_BYTES}."
         )
         return None
     try:
-        return completed.stdout.decode("utf-8")
+        return stdout_blob.decode("utf-8")
     except UnicodeDecodeError as exc:
         warnings.append(f"local_file_unreadable ({clean_path}): {exc}")
         return None

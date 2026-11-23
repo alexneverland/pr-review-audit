@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -1185,6 +1186,126 @@ class TestAuditScenarios(unittest.TestCase):
             snippet = ctx["items"][0]["current_code_excerpt"]["snippet"]
             self.assertIn("COMMITTED_SAFE", snippet)
             self.assertNotIn("DIRTY_EDIT_123", snippet)
+
+    def test_repo_dir_disables_git_replace_objects(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp) / "repo"
+            head_sha = _init_git_repo(repo_dir, {"src/verify.py": "COMMITTED_ORIGINAL\n"})
+            orig_blob = _git(repo_dir, "rev-parse", f"{head_sha}:src/verify.py")
+
+            fake_file = Path(tmp) / "fake.py"
+            fake_file.write_text("REPLACED_LOCAL_FORGERY\n", encoding="utf-8")
+            fake_blob = _git(repo_dir, "hash-object", "-w", str(fake_file))
+            _git(repo_dir, "replace", orig_blob, fake_blob)
+
+            pr_data = {
+                "schema_version": "1.0",
+                "pr": {
+                    "host": "github.com",
+                    "owner": "acme",
+                    "repo": "app",
+                    "number": 10,
+                    "url": "https://github.com/acme/app/pull/10",
+                    "title": "Replace ref safety",
+                    "state": "OPEN",
+                    "head_sha": head_sha,
+                },
+                "commits": [{"sha": head_sha, "short_sha": head_sha[:7]}],
+                "files": [{"filename": "src/verify.py", "status": "modified", "changes": 1, "patch": "+x"}],
+                "review_items": [
+                    {
+                        "id": "T_REPLACE",
+                        "source_type": "review_thread",
+                        "url": "https://github.com/acme/app/pull/10#r1",
+                        "author": "rev",
+                        "path": "src/verify.py",
+                        "line": 1,
+                        "original_line": 1,
+                        "commit_sha": head_sha,
+                        "original_commit_sha": head_sha,
+                        "is_resolved": False,
+                        "is_outdated": False,
+                        "diff_hunk": "",
+                        "comments": [{"body": "Check"}],
+                        "metadata_warnings": [],
+                    }
+                ],
+                "warnings": [],
+            }
+
+            ctx = compare.build_audit_context(pr_data, repo_dir=repo_dir)
+            snippet = ctx["items"][0]["current_code_excerpt"]["snippet"]
+            self.assertIn("COMMITTED_ORIGINAL", snippet)
+            self.assertNotIn("REPLACED_LOCAL_FORGERY", snippet)
+
+    def test_repo_dir_blocks_lazy_fetch_and_promisor_uploadpack(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            repo_dir = tmp_dir / "repo"
+            upstream_dir = tmp_dir / "upstream"
+            _init_git_repo(upstream_dir, {"src/verify.py": "REMOTE_COMMITTED\n"})
+            head_sha = _init_git_repo(repo_dir, {"src/verify.py": "REMOTE_COMMITTED\n"})
+            blob_oid = _git(repo_dir, "rev-parse", f"{head_sha}:src/verify.py")
+
+            marker_file = tmp_dir / "lazy_pwned.txt"
+            uploadpack_script = tmp_dir / "evil_uploadpack.py"
+            uploadpack_script.write_text(
+                "import pathlib\n"
+                f"pathlib.Path({marker_file.as_posix()!r}).write_text('pwned', encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            uploadpack_cmd = f'"{Path(sys.executable).as_posix()}" "{uploadpack_script.as_posix()}"'
+            _git(repo_dir, "config", "core.repositoryformatversion", "1")
+            _git(repo_dir, "config", "extensions.partialclone", "origin")
+            _git(repo_dir, "config", "remote.origin.url", upstream_dir.as_posix())
+            _git(repo_dir, "config", "remote.origin.promisor", "true")
+            _git(repo_dir, "config", "remote.origin.uploadpack", uploadpack_cmd)
+
+            obj_path = repo_dir / ".git" / "objects" / blob_oid[:2] / blob_oid[2:]
+            os.chmod(obj_path, 0o644)
+            obj_path.unlink()
+
+            pr_data = {
+                "schema_version": "1.0",
+                "pr": {
+                    "host": "github.com",
+                    "owner": "acme",
+                    "repo": "app",
+                    "number": 11,
+                    "url": "https://github.com/acme/app/pull/11",
+                    "title": "Partial clone safety",
+                    "state": "OPEN",
+                    "head_sha": head_sha,
+                },
+                "commits": [{"sha": head_sha, "short_sha": head_sha[:7]}],
+                "files": [{"filename": "src/verify.py", "status": "modified", "changes": 1, "patch": "+x"}],
+                "review_items": [
+                    {
+                        "id": "T_PARTIAL",
+                        "source_type": "review_thread",
+                        "url": "https://github.com/acme/app/pull/11#r1",
+                        "author": "rev",
+                        "path": "src/verify.py",
+                        "line": 1,
+                        "original_line": 1,
+                        "commit_sha": head_sha,
+                        "original_commit_sha": head_sha,
+                        "is_resolved": False,
+                        "is_outdated": False,
+                        "diff_hunk": "",
+                        "comments": [{"body": "Check"}],
+                        "metadata_warnings": [],
+                    }
+                ],
+                "warnings": [],
+            }
+
+            ctx = compare.build_audit_context(pr_data, repo_dir=repo_dir)
+            self.assertFalse(marker_file.exists(), "Promisor lazy-fetch must never run.")
+            self.assertIsNone(ctx["items"][0]["current_code_excerpt"])
+            self.assertTrue(
+                any("local_file_unreadable (src/verify.py)" in w for w in ctx["warnings"])
+            )
 
     def test_partially_fixed_without_evidence_or_refs_downgraded_to_uncertain(self) -> None:
         context = {
