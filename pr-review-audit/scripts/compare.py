@@ -9,9 +9,12 @@ from __future__ import annotations
 
 import argparse
 import base64
+from functools import lru_cache
 import json
+import os
 from pathlib import Path, PurePosixPath
 import re
+import subprocess
 import sys
 from typing import Any
 from urllib.parse import quote
@@ -591,7 +594,153 @@ def _fetch_file_via_gh(
         return None
 
 
-def _read_local_repo_file(repo_root: Path, rel_path: str, warnings: list[str]) -> str | None:
+@lru_cache(maxsize=1)
+def _git_supports_no_lazy_fetch() -> bool:
+    """Return True if the installed `git` binary supports the `--no-lazy-fetch` flag."""
+    try:
+        completed = subprocess.run(
+            ["git", "--no-lazy-fetch", "--version"],
+            capture_output=True,
+            shell=False,
+            check=False,
+        )
+    except OSError:
+        return False
+    return completed.returncode == 0
+
+
+def _run_git_readonly_bytes(repo_root: Path, git_args: list[str]) -> tuple[int, bytes, bytes]:
+    """Run a read-only `git` command inside `repo_root` without filters, lazy fetch, or replace refs."""
+    cmd = ["git"]
+    if _git_supports_no_lazy_fetch():
+        cmd.append("--no-lazy-fetch")
+    cmd.extend(
+        [
+            "--no-replace-objects",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "protocol.allow=never",
+            "-c",
+            "protocol.file.allow=never",
+            "-c",
+            "protocol.ext.allow=never",
+            "-c",
+            "protocol.ssh.allow=never",
+            "-c",
+            "protocol.http.allow=never",
+            "-c",
+            "protocol.https.allow=never",
+            "-c",
+            "protocol.git.allow=never",
+            "-c",
+            "core.sshCommand=false",
+            "-C",
+            str(repo_root),
+            *git_args,
+        ]
+    )
+    env = os.environ.copy()
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    try:
+        completed = subprocess.run(
+            cmd,
+            capture_output=True,
+            env=env,
+            shell=False,
+            check=False,
+        )
+    except OSError as exc:
+        return 1, b"", str(exc).encode("utf-8", errors="replace")
+    return completed.returncode, completed.stdout, completed.stderr
+
+
+def _run_git_readonly(repo_root: Path, git_args: list[str]) -> tuple[int, str, str]:
+    """Run a read-only `git` command and decode UTF-8 text output."""
+    rc, stdout, stderr = _run_git_readonly_bytes(repo_root, git_args)
+    return (
+        rc,
+        stdout.decode("utf-8", errors="replace"),
+        stderr.decode("utf-8", errors="replace"),
+    )
+
+
+def _is_partial_or_promisor_repo(repo_root: Path) -> bool:
+    """Detect partial-clone / promisor configuration from Git config without fetching objects."""
+    rc, stdout, _ = _run_git_readonly(repo_root, ["config", "--list", "--null"])
+    if rc != 0:
+        return True
+    for entry in stdout.split("\x00"):
+        if not entry:
+            continue
+        if "\n" in entry:
+            key, val = entry.split("\n", 1)
+            has_val = True
+        else:
+            key, val = entry, ""
+            has_val = False
+        key_l = key.strip().lower()
+        val_l = val.strip().lower()
+        if key_l == "extensions.partialclone":
+            return True
+        if key_l.startswith("remote.") and key_l.endswith(".promisor"):
+            if not has_val or val_l not in {"false", "0", "no", "off", ""}:
+                return True
+    return False
+
+
+def _verify_local_repo_head(
+    repo_root: Path,
+    head_sha: str | None,
+    warnings: list[str],
+) -> bool:
+    """Verify `--repo-dir` is a Git repository root checked out at PR HEAD."""
+    if not head_sha or not _SHA_RE.fullmatch(str(head_sha)):
+        warnings.append("repo_dir_skipped_missing_pr_head_sha")
+        return False
+
+    rc, stdout, _ = _run_git_readonly(repo_root, ["rev-parse", "--is-inside-work-tree"])
+    if rc != 0 or stdout.strip().lower() != "true":
+        warnings.append("repo_dir_not_a_git_repository")
+        return False
+
+    rc_top, stdout_top, _ = _run_git_readonly(repo_root, ["rev-parse", "--show-toplevel"])
+    if rc_top != 0 or not stdout_top.strip():
+        warnings.append("repo_dir_not_a_git_repository")
+        return False
+    try:
+        if Path(stdout_top.strip()).resolve() != repo_root:
+            warnings.append("repo_dir_not_git_root")
+            return False
+    except OSError:
+        warnings.append("repo_dir_not_a_git_repository")
+        return False
+
+    rc_head, stdout_head, _ = _run_git_readonly(repo_root, ["rev-parse", "HEAD"])
+    local_head = stdout_head.strip().lower()
+    if rc_head != 0 or not _SHA_RE.fullmatch(local_head):
+        warnings.append("repo_dir_missing_head_commit")
+        return False
+
+    pr_head = str(head_sha).strip().lower()
+    if not (local_head == pr_head or local_head.startswith(pr_head)):
+        warnings.append(f"repo_dir_head_mismatch: local={local_head[:7]} pr={pr_head[:7]}")
+        return False
+
+    if not _git_supports_no_lazy_fetch() and _is_partial_or_promisor_repo(repo_root):
+        warnings.append("repo_dir_partial_clone_unsupported_without_no_lazy_fetch")
+        return False
+
+    return True
+
+
+def _read_local_repo_file(
+    repo_root: Path,
+    rel_path: str,
+    warnings: list[str],
+) -> str | None:
+    """Read a committed regular blob at HEAD without running Git filters."""
     clean_path = _validate_rel_posix_path(rel_path)
     if clean_path is None:
         warnings.append(f"skipped_unsafe_local_path: {rel_path!r}")
@@ -600,17 +749,60 @@ def _read_local_repo_file(repo_root: Path, rel_path: str, warnings: list[str]) -
     if not candidate.is_relative_to(repo_root):
         warnings.append(f"blocked_path_traversal: {rel_path!r}")
         return None
-    if not candidate.is_file():
+    if not _git_supports_no_lazy_fetch() and _is_partial_or_promisor_repo(repo_root):
+        warnings.append("repo_dir_partial_clone_unsupported_without_no_lazy_fetch")
+        return None
+
+    rc_tree, stdout_tree, _ = _run_git_readonly(
+        repo_root, ["ls-tree", "HEAD", "--", clean_path]
+    )
+    if rc_tree != 0:
+        warnings.append(f"local_file_unreadable ({clean_path}): failed to inspect HEAD tree.")
+        return None
+    if not stdout_tree.strip():
+        return None
+
+    line = stdout_tree.splitlines()[0].strip()
+    if "\t" not in line:
+        return None
+    meta, _tab_path = line.split("\t", 1)
+    parts = meta.split()
+    if len(parts) != 3:
+        return None
+    mode, obj_type, oid = parts
+    if not _SHA_RE.fullmatch(oid):
+        return None
+    if mode not in {"100644", "100755"} or obj_type != "blob":
+        warnings.append(f"repo_dir_non_regular_file ({clean_path})")
+        return None
+
+    rc_size, stdout_size, _ = _run_git_readonly(repo_root, ["cat-file", "-s", oid])
+    if rc_size != 0:
+        warnings.append(f"local_file_unreadable ({clean_path}): failed to inspect blob size.")
         return None
     try:
-        size = candidate.stat().st_size
-        if size > MAX_FILE_BYTES:
-            warnings.append(
-                f"local_file_too_large ({clean_path}): {size} bytes exceeds {MAX_FILE_BYTES}."
-            )
-            return None
-        return candidate.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
+        size = int(stdout_size.strip())
+    except ValueError:
+        warnings.append(f"local_file_unreadable ({clean_path}): invalid blob size.")
+        return None
+    if size > MAX_FILE_BYTES:
+        warnings.append(
+            f"local_file_too_large ({clean_path}): {size} bytes exceeds {MAX_FILE_BYTES}."
+        )
+        return None
+
+    rc_blob, stdout_blob, _ = _run_git_readonly_bytes(repo_root, ["cat-file", "blob", oid])
+    if rc_blob != 0:
+        warnings.append(f"local_file_unreadable ({clean_path}): git cat-file failed.")
+        return None
+    if len(stdout_blob) > MAX_FILE_BYTES:
+        warnings.append(
+            f"local_file_too_large ({clean_path}): {len(stdout_blob)} bytes exceeds {MAX_FILE_BYTES}."
+        )
+        return None
+    try:
+        return stdout_blob.decode("utf-8")
+    except UnicodeDecodeError as exc:
         warnings.append(f"local_file_unreadable ({clean_path}): {exc}")
         return None
 
@@ -669,14 +861,6 @@ def build_audit_context(
         for sha, data in fetched.items():
             resolved_compare.setdefault(sha, data)
 
-    if repo_dir is not None:
-        repo_root = repo_dir.resolve(strict=True)
-        for path in _collect_target_paths(pr_data, rename_map):
-            if path not in resolved_contents:
-                text = _read_local_repo_file(repo_root, path, warnings)
-                if text is not None:
-                    resolved_contents[path] = text
-
     if fetch_files:
         pr = pr_data.get("pr") or {}
         host = pr.get("host") or "github.com"
@@ -689,6 +873,16 @@ def build_audit_context(
                     text = _fetch_file_via_gh(
                         client, str(host), str(owner), str(repo), str(head_sha), path, warnings
                     )
+                    if text is not None:
+                        resolved_contents[path] = text
+
+    if repo_dir is not None:
+        repo_root = repo_dir.resolve(strict=True)
+        head_sha = (pr_data.get("pr") or {}).get("head_sha")
+        if _verify_local_repo_head(repo_root, head_sha, warnings):
+            for path in _collect_target_paths(pr_data, rename_map):
+                if path not in resolved_contents:
+                    text = _read_local_repo_file(repo_root, path, warnings)
                     if text is not None:
                         resolved_contents[path] = text
 
