@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from functools import lru_cache
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -593,18 +594,40 @@ def _fetch_file_via_gh(
         return None
 
 
+@lru_cache(maxsize=1)
+def _git_supports_no_lazy_fetch() -> bool:
+    """Return True if the installed `git` binary supports the `--no-lazy-fetch` flag."""
+    try:
+        completed = subprocess.run(
+            ["git", "--no-lazy-fetch", "--version"],
+            capture_output=True,
+            shell=False,
+            check=False,
+        )
+    except OSError:
+        return False
+    return completed.returncode == 0
+
+
 def _run_git_readonly_bytes(repo_root: Path, git_args: list[str]) -> tuple[int, bytes, bytes]:
     """Run a read-only `git` command inside `repo_root` without filters, lazy fetch, or replace refs."""
-    cmd = [
-        "git",
-        "--no-lazy-fetch",
-        "--no-replace-objects",
-        "-c",
-        "core.fsmonitor=false",
-        "-C",
-        str(repo_root),
-        *git_args,
-    ]
+    cmd = ["git"]
+    if _git_supports_no_lazy_fetch():
+        cmd.append("--no-lazy-fetch")
+    cmd.extend(
+        [
+            "--no-replace-objects",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "protocol.file.allow=never",
+            "-c",
+            "protocol.ext.allow=never",
+            "-C",
+            str(repo_root),
+            *git_args,
+        ]
+    )
     env = os.environ.copy()
     env["GIT_NO_REPLACE_OBJECTS"] = "1"
     env["GIT_TERMINAL_PROMPT"] = "0"
@@ -629,6 +652,28 @@ def _run_git_readonly(repo_root: Path, git_args: list[str]) -> tuple[int, str, s
         stdout.decode("utf-8", errors="replace"),
         stderr.decode("utf-8", errors="replace"),
     )
+
+
+def _is_partial_or_promisor_repo(repo_root: Path) -> bool:
+    """Detect partial-clone / promisor configuration from Git config without fetching objects."""
+    rc, stdout, _ = _run_git_readonly(repo_root, ["config", "--list"])
+    if rc != 0:
+        return True
+    for raw_line in stdout.splitlines():
+        key, sep, val = raw_line.partition("=")
+        if not sep:
+            continue
+        key_l = key.strip().lower()
+        val_l = val.strip().lower()
+        if key_l == "extensions.partialclone" and val_l:
+            return True
+        if (
+            key_l.startswith("remote.")
+            and key_l.endswith(".promisor")
+            and val_l in {"true", "1", "yes", "on"}
+        ):
+            return True
+    return False
 
 
 def _verify_local_repo_head(
@@ -669,6 +714,10 @@ def _verify_local_repo_head(
         warnings.append(f"repo_dir_head_mismatch: local={local_head[:7]} pr={pr_head[:7]}")
         return False
 
+    if not _git_supports_no_lazy_fetch() and _is_partial_or_promisor_repo(repo_root):
+        warnings.append("repo_dir_partial_clone_unsupported_without_no_lazy_fetch")
+        return False
+
     return True
 
 
@@ -685,6 +734,9 @@ def _read_local_repo_file(
     candidate = (repo_root / clean_path).resolve()
     if not candidate.is_relative_to(repo_root):
         warnings.append(f"blocked_path_traversal: {rel_path!r}")
+        return None
+    if not _git_supports_no_lazy_fetch() and _is_partial_or_promisor_repo(repo_root):
+        warnings.append("repo_dir_partial_clone_unsupported_without_no_lazy_fetch")
         return None
 
     rc_tree, stdout_tree, _ = _run_git_readonly(

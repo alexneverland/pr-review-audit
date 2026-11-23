@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
@@ -1304,8 +1305,66 @@ class TestAuditScenarios(unittest.TestCase):
             self.assertFalse(marker_file.exists(), "Promisor lazy-fetch must never run.")
             self.assertIsNone(ctx["items"][0]["current_code_excerpt"])
             self.assertTrue(
-                any("local_file_unreadable (src/verify.py)" in w for w in ctx["warnings"])
+                any(
+                    "local_file_unreadable (src/verify.py)" in w
+                    or "repo_dir_partial_clone_unsupported_without_no_lazy_fetch" in w
+                    for w in ctx["warnings"]
+                )
             )
+
+            # Simulate Git < 2.48 (no `--no-lazy-fetch` flag): partial clone must still be blocked
+            with mock.patch.object(compare, "_git_supports_no_lazy_fetch", return_value=False):
+                ctx_legacy_partial = compare.build_audit_context(pr_data, repo_dir=repo_dir)
+                self.assertFalse(marker_file.exists(), "Legacy Git path must not trigger uploadpack.")
+                self.assertIsNone(ctx_legacy_partial["items"][0]["current_code_excerpt"])
+                self.assertIn(
+                    "repo_dir_partial_clone_unsupported_without_no_lazy_fetch",
+                    ctx_legacy_partial["warnings"],
+                )
+
+    def test_repo_dir_works_on_older_git_without_no_lazy_fetch_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp) / "repo"
+            head_sha = _init_git_repo(repo_dir, {"src/verify.py": "LEGACY_GIT_OK\n"})
+            pr_data = {
+                "schema_version": "1.0",
+                "pr": {
+                    "host": "github.com",
+                    "owner": "acme",
+                    "repo": "app",
+                    "number": 12,
+                    "url": "https://github.com/acme/app/pull/12",
+                    "title": "Git 2.43 compatibility",
+                    "state": "OPEN",
+                    "head_sha": head_sha,
+                },
+                "commits": [{"sha": head_sha, "short_sha": head_sha[:7]}],
+                "files": [{"filename": "src/verify.py", "status": "modified", "changes": 1, "patch": "+x"}],
+                "review_items": [
+                    {
+                        "id": "T_LEGACY",
+                        "source_type": "review_thread",
+                        "url": "https://github.com/acme/app/pull/12#r1",
+                        "author": "rev",
+                        "path": "src/verify.py",
+                        "line": 1,
+                        "original_line": 1,
+                        "commit_sha": head_sha,
+                        "original_commit_sha": head_sha,
+                        "is_resolved": False,
+                        "is_outdated": False,
+                        "diff_hunk": "",
+                        "comments": [{"body": "Check"}],
+                        "metadata_warnings": [],
+                    }
+                ],
+                "warnings": [],
+            }
+
+            with mock.patch.object(compare, "_git_supports_no_lazy_fetch", return_value=False):
+                ctx = compare.build_audit_context(pr_data, repo_dir=repo_dir)
+                snippet = ctx["items"][0]["current_code_excerpt"]["snippet"]
+                self.assertIn("LEGACY_GIT_OK", snippet)
 
     def test_partially_fixed_without_evidence_or_refs_downgraded_to_uncertain(self) -> None:
         context = {
