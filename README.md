@@ -115,7 +115,7 @@ python -m unittest discover -s pr-review-audit/tests -v
 
 - **Read-only by default:** Only issues GraphQL queries and REST `GET` requests via `gh api`; never modifies source code or posts GitHub comments without explicit permission.
 - **No shell interpolation:** Validates PR URLs, owners, repos, numbers, and hosts strictly, invoking `gh` with `shell=False` and GraphQL `--input -`.
-- **Untrusted input isolation:** Never executes repository scripts or tests; blocks local `--repo-dir` path traversal and verifies `--repo-dir` is a clean Git checkout matching PR `HEAD` (with `--fetch-files` taking precedence); sanitizes raw HTML/table characters in untrusted PR text.
+- **Untrusted input isolation:** Never executes repository scripts or tests; blocks local `--repo-dir` path traversal, verifies `--repo-dir` is a Git repository root matching PR `HEAD`, and reads committed `HEAD` blobs directly without applying Git filters (with `--fetch-files` taking precedence); sanitizes raw HTML/table characters in untrusted PR text.
 - **Evidence guardrails:** `report.py` automatically downgrades `FIXED`, `STILL_PRESENT`, or `PARTIALLY_FIXED` findings to `UNCERTAIN` if `evidence` or `code_references` are missing.
 
 ## Explicit Limitations & Known Failure Cases

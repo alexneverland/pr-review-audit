@@ -655,9 +655,8 @@ def _read_local_repo_file(
     repo_root: Path,
     rel_path: str,
     warnings: list[str],
-    *,
-    check_clean: bool = True,
 ) -> str | None:
+    """Read a committed regular blob at HEAD without running Git filters."""
     clean_path = _validate_rel_posix_path(rel_path)
     if clean_path is None:
         warnings.append(f"skipped_unsafe_local_path: {rel_path!r}")
@@ -666,27 +665,59 @@ def _read_local_repo_file(
     if not candidate.is_relative_to(repo_root):
         warnings.append(f"blocked_path_traversal: {rel_path!r}")
         return None
-    if check_clean:
-        rc, stdout, _ = _run_git_readonly(
-            repo_root, ["status", "--porcelain", "--", clean_path]
-        )
-        if rc != 0:
-            warnings.append(f"repo_dir_status_check_failed ({clean_path})")
-            return None
-        if stdout.strip():
-            warnings.append(f"repo_dir_dirty_file ({clean_path})")
-            return None
-    if not candidate.is_file():
+
+    rc_tree, stdout_tree, _ = _run_git_readonly(
+        repo_root, ["ls-tree", "HEAD", "--", clean_path]
+    )
+    if rc_tree != 0 or not stdout_tree.strip():
+        return None
+
+    line = stdout_tree.splitlines()[0].strip()
+    if "\t" not in line:
+        return None
+    meta, _tab_path = line.split("\t", 1)
+    parts = meta.split()
+    if len(parts) != 3:
+        return None
+    mode, obj_type, oid = parts
+    if not _SHA_RE.fullmatch(oid):
+        return None
+    if mode not in {"100644", "100755"} or obj_type != "blob":
+        warnings.append(f"repo_dir_non_regular_file ({clean_path})")
+        return None
+
+    rc_size, stdout_size, _ = _run_git_readonly(repo_root, ["cat-file", "-s", oid])
+    if rc_size != 0:
+        warnings.append(f"local_file_unreadable ({clean_path}): failed to inspect blob size.")
         return None
     try:
-        size = candidate.stat().st_size
-        if size > MAX_FILE_BYTES:
-            warnings.append(
-                f"local_file_too_large ({clean_path}): {size} bytes exceeds {MAX_FILE_BYTES}."
-            )
-            return None
-        return candidate.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
+        size = int(stdout_size.strip())
+    except ValueError:
+        warnings.append(f"local_file_unreadable ({clean_path}): invalid blob size.")
+        return None
+    if size > MAX_FILE_BYTES:
+        warnings.append(
+            f"local_file_too_large ({clean_path}): {size} bytes exceeds {MAX_FILE_BYTES}."
+        )
+        return None
+
+    cmd = ["git", "-c", "core.fsmonitor=false", "-C", str(repo_root), "cat-file", "blob", oid]
+    try:
+        completed = subprocess.run(cmd, capture_output=True, shell=False, check=False)
+    except OSError as exc:
+        warnings.append(f"local_file_unreadable ({clean_path}): {exc}")
+        return None
+    if completed.returncode != 0:
+        warnings.append(f"local_file_unreadable ({clean_path}): git cat-file failed.")
+        return None
+    if len(completed.stdout) > MAX_FILE_BYTES:
+        warnings.append(
+            f"local_file_too_large ({clean_path}): {len(completed.stdout)} bytes exceeds {MAX_FILE_BYTES}."
+        )
+        return None
+    try:
+        return completed.stdout.decode("utf-8")
+    except UnicodeDecodeError as exc:
         warnings.append(f"local_file_unreadable ({clean_path}): {exc}")
         return None
 

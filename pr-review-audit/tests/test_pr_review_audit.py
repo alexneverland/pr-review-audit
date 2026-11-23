@@ -1107,7 +1107,7 @@ class TestAuditScenarios(unittest.TestCase):
             self.assertTrue(any(w.startswith("repo_dir_head_mismatch:") for w in ctx_mismatch["warnings"]))
             self.assertIsNone(ctx_mismatch["items"][0]["current_code_excerpt"])
 
-            # Matching HEAD SHA but dirty working-tree modification must be rejected
+            # Matching HEAD SHA with a dirty working-tree edit must read committed HEAD blob, not dirty file
             base_pr["pr"]["head_sha"] = local_head
             base_pr["commits"] = [{"sha": local_head, "short_sha": local_head[:7]}]
             base_pr["review_items"][0]["commit_sha"] = local_head
@@ -1115,8 +1115,76 @@ class TestAuditScenarios(unittest.TestCase):
             (repo_dir / "src" / "verify.py").write_text("DIRTY_UNCOMMITTED_EDIT\n", encoding="utf-8")
 
             ctx_dirty = compare.build_audit_context(base_pr, repo_dir=repo_dir)
-            self.assertIn("repo_dir_dirty_file (src/verify.py)", ctx_dirty["warnings"])
-            self.assertIsNone(ctx_dirty["items"][0]["current_code_excerpt"])
+            snippet = ctx_dirty["items"][0]["current_code_excerpt"]["snippet"]
+            self.assertIn("CLEAN_COMMITTED_LINE", snippet)
+            self.assertNotIn("DIRTY_UNCOMMITTED_EDIT", snippet)
+
+    def test_repo_dir_does_not_execute_configured_git_clean_filter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            repo_dir = tmp_dir / "repo"
+            marker_file = tmp_dir / "pwned.txt"
+            filter_script = tmp_dir / "evil_filter.py"
+            filter_script.write_text(
+                "import pathlib, sys\n"
+                f"pathlib.Path({marker_file.as_posix()!r}).write_text('executed', encoding='utf-8')\n"
+                "sys.stdout.write(sys.stdin.read())\n",
+                encoding="utf-8",
+            )
+
+            head_sha = _init_git_repo(
+                repo_dir,
+                {
+                    ".gitattributes": "*.py filter=evil\n",
+                    "src/verify.py": "COMMITTED_SAFE\n",
+                },
+            )
+            filter_cmd = f'"{Path(sys.executable).as_posix()}" "{filter_script.as_posix()}"'
+            _git(repo_dir, "config", "filter.evil.clean", filter_cmd)
+
+            # Same-length working-tree edit that would trigger clean filter under `git status`
+            (repo_dir / "src" / "verify.py").write_text("DIRTY_EDIT_123\n", encoding="utf-8")
+
+            pr_data = {
+                "schema_version": "1.0",
+                "pr": {
+                    "host": "github.com",
+                    "owner": "acme",
+                    "repo": "app",
+                    "number": 9,
+                    "url": "https://github.com/acme/app/pull/9",
+                    "title": "Clean filter safety",
+                    "state": "OPEN",
+                    "head_sha": head_sha,
+                },
+                "commits": [{"sha": head_sha, "short_sha": head_sha[:7]}],
+                "files": [{"filename": "src/verify.py", "status": "modified", "changes": 1, "patch": "+x"}],
+                "review_items": [
+                    {
+                        "id": "T_FILTER",
+                        "source_type": "review_thread",
+                        "url": "https://github.com/acme/app/pull/9#r1",
+                        "author": "rev",
+                        "path": "src/verify.py",
+                        "line": 1,
+                        "original_line": 1,
+                        "commit_sha": head_sha,
+                        "original_commit_sha": head_sha,
+                        "is_resolved": False,
+                        "is_outdated": False,
+                        "diff_hunk": "",
+                        "comments": [{"body": "Check"}],
+                        "metadata_warnings": [],
+                    }
+                ],
+                "warnings": [],
+            }
+
+            ctx = compare.build_audit_context(pr_data, repo_dir=repo_dir)
+            self.assertFalse(marker_file.exists(), "Git clean filter must never be executed.")
+            snippet = ctx["items"][0]["current_code_excerpt"]["snippet"]
+            self.assertIn("COMMITTED_SAFE", snippet)
+            self.assertNotIn("DIRTY_EDIT_123", snippet)
 
     def test_partially_fixed_without_evidence_or_refs_downgraded_to_uncertain(self) -> None:
         context = {

@@ -43,7 +43,7 @@ Run `compare.py` to compute review freshness against `HEAD`, track renamed/delet
 python "<SKILL_DIR>/scripts/compare.py" "<WORK_DIR>/collected.json" --fetch-diffs --fetch-files --output "<WORK_DIR>/audit-context.json"
 ```
 
-- If auditing from an already checked-out local clone at `HEAD`, you may also pass `--repo-dir "<LOCAL_REPO_PATH>"` (read-only lookup with path-traversal protection; requires a clean Git checkout matching PR `HEAD`, with `--fetch-files` taking precedence).
+- If auditing from an already checked-out local clone at `HEAD`, you may also pass `--repo-dir "<LOCAL_REPO_PATH>"` (read-only lookup with path-traversal protection; verifies Git `HEAD` matches the PR and reads committed `HEAD` blobs directly without applying Git filters, while `--fetch-files` takes precedence).
 - Review `warnings` in `audit-context.json` for missing patches, truncated diffs, or missing metadata.
 
 ### Step 3: Perform Semantic Verification
