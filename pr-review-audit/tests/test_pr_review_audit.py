@@ -1366,6 +1366,61 @@ class TestAuditScenarios(unittest.TestCase):
                 snippet = ctx["items"][0]["current_code_excerpt"]["snippet"]
                 self.assertIn("LEGACY_GIT_OK", snippet)
 
+    def test_repo_dir_blocks_bare_promisor_without_equals(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp) / "repo"
+            head_sha = _init_git_repo(repo_dir, {"src/verify.py": "COMMITTED\n"})
+            cfg_path = repo_dir / ".git" / "config"
+            cfg_text = cfg_path.read_text(encoding="utf-8")
+            cfg_path.write_text(
+                cfg_text + '\n[remote "origin"]\n\turl = ssh://example.com/repo.git\n\tpromisor\n',
+                encoding="utf-8",
+            )
+
+            pr_data = {
+                "schema_version": "1.0",
+                "pr": {
+                    "host": "github.com",
+                    "owner": "acme",
+                    "repo": "app",
+                    "number": 13,
+                    "url": "https://github.com/acme/app/pull/13",
+                    "title": "Bare promisor safety",
+                    "state": "OPEN",
+                    "head_sha": head_sha,
+                },
+                "commits": [{"sha": head_sha, "short_sha": head_sha[:7]}],
+                "files": [{"filename": "src/verify.py", "status": "modified", "changes": 1, "patch": "+x"}],
+                "review_items": [
+                    {
+                        "id": "T_BARE_PROMISOR",
+                        "source_type": "review_thread",
+                        "url": "https://github.com/acme/app/pull/13#r1",
+                        "author": "rev",
+                        "path": "src/verify.py",
+                        "line": 1,
+                        "original_line": 1,
+                        "commit_sha": head_sha,
+                        "original_commit_sha": head_sha,
+                        "is_resolved": False,
+                        "is_outdated": False,
+                        "diff_hunk": "",
+                        "comments": [{"body": "Check"}],
+                        "metadata_warnings": [],
+                    }
+                ],
+                "warnings": [],
+            }
+
+            with mock.patch.object(compare, "_git_supports_no_lazy_fetch", return_value=False):
+                self.assertTrue(compare._is_partial_or_promisor_repo(repo_dir))
+                ctx = compare.build_audit_context(pr_data, repo_dir=repo_dir)
+                self.assertIsNone(ctx["items"][0]["current_code_excerpt"])
+                self.assertIn(
+                    "repo_dir_partial_clone_unsupported_without_no_lazy_fetch",
+                    ctx["warnings"],
+                )
+
     def test_partially_fixed_without_evidence_or_refs_downgraded_to_uncertain(self) -> None:
         context = {
             "pr": {

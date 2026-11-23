@@ -620,9 +620,9 @@ def _run_git_readonly_bytes(repo_root: Path, git_args: list[str]) -> tuple[int, 
             "-c",
             "core.fsmonitor=false",
             "-c",
-            "protocol.file.allow=never",
+            "protocol.allow=never",
             "-c",
-            "protocol.ext.allow=never",
+            "core.sshCommand=false",
             "-C",
             str(repo_root),
             *git_args,
@@ -656,23 +656,25 @@ def _run_git_readonly(repo_root: Path, git_args: list[str]) -> tuple[int, str, s
 
 def _is_partial_or_promisor_repo(repo_root: Path) -> bool:
     """Detect partial-clone / promisor configuration from Git config without fetching objects."""
-    rc, stdout, _ = _run_git_readonly(repo_root, ["config", "--list"])
+    rc, stdout, _ = _run_git_readonly(repo_root, ["config", "--list", "--null"])
     if rc != 0:
         return True
-    for raw_line in stdout.splitlines():
-        key, sep, val = raw_line.partition("=")
-        if not sep:
+    for entry in stdout.split("\x00"):
+        if not entry:
             continue
+        if "\n" in entry:
+            key, val = entry.split("\n", 1)
+            has_val = True
+        else:
+            key, val = entry, ""
+            has_val = False
         key_l = key.strip().lower()
         val_l = val.strip().lower()
-        if key_l == "extensions.partialclone" and val_l:
+        if key_l == "extensions.partialclone" and (not has_val or val_l != ""):
             return True
-        if (
-            key_l.startswith("remote.")
-            and key_l.endswith(".promisor")
-            and val_l in {"true", "1", "yes", "on"}
-        ):
-            return True
+        if key_l.startswith("remote.") and key_l.endswith(".promisor"):
+            if not has_val or val_l not in {"false", "0", "no", "off", ""}:
+                return True
     return False
 
 
