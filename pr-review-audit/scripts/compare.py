@@ -744,7 +744,7 @@ def _read_local_repo_file(
 ) -> str | None:
     """Read a committed regular blob at the pinned commit SHA (or HEAD) without Git filters."""
     clean_path = _validate_rel_posix_path(rel_path)
-    if clean_path is None or Path(clean_path).drive:
+    if clean_path is None:
         warnings.append(f"skipped_unsafe_local_path: {rel_path!r}")
         return None
     if commit_sha is not None:
@@ -758,10 +758,9 @@ def _read_local_repo_file(
         warnings.append("repo_dir_partial_clone_unsupported_without_no_lazy_fetch")
         return None
 
-    # The verified tree defines the path and file type. The worktree can change
-    # after verification, so do not resolve any part of the path through it.
+    # Interpret the path as a Git tree entry, even if the OS could not check it out.
     rc_tree, stdout_tree, _ = _run_git_readonly_bytes(
-        repo_root, ["--literal-pathspecs", "ls-tree", "-z", tree_ref, "--", clean_path]
+        repo_root, ["--literal-pathspecs", "ls-tree", "-z", tree_ref, "--", f"./{clean_path}"]
     )
     if rc_tree != 0:
         warnings.append(f"local_file_unreadable ({clean_path}): failed to inspect commit tree.")

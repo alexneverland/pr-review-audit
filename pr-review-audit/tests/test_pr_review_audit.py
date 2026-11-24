@@ -26,10 +26,11 @@ def _b64(text: str) -> str:
     return base64.b64encode(text.encode("utf-8")).decode("ascii")
 
 
-def _git(repo_dir: Path, *args: str) -> str:
+def _git(repo_dir: Path, *args: str, stdin: str | None = None) -> str:
     proc = subprocess.run(
         ["git", "-c", "core.fsmonitor=false", "-C", str(repo_dir), *args],
         capture_output=True,
+        input=stdin,
         text=True,
         encoding="utf-8",
         shell=False,
@@ -1543,6 +1544,29 @@ class TestAuditScenarios(unittest.TestCase):
             excerpt = context["items"][0]["current_code_excerpt"]
             self.assertEqual(excerpt["snippet"], "1: COMMITTED_CONTENT")
             self.assertEqual(context["warnings"], [])
+
+    def test_repo_dir_reads_drive_prefixed_path_from_git_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp) / "repo"
+            parent = _init_git_repo(repo_dir, {"src/verify.py": "COMMITTED_CONTENT\n"})
+            subtree = _git(repo_dir, "rev-parse", f"{parent}^{{tree}}")
+            # Build a tree object directly because Windows cannot check out a directory named C:.
+            root_tree = _git(repo_dir, "mktree", "-z", stdin=f"040000 tree {subtree}\tC:\0")
+            head_sha = _git(repo_dir, "commit-tree", root_tree, "-p", parent, "-m", "Nested tree")
+            _git(repo_dir, "update-ref", "HEAD", head_sha, parent)
+
+            rel_path = "C:/src/verify.py"
+            collected = {
+                "pr": {"head_sha": head_sha},
+                "files": [{"filename": rel_path}],
+                "review_items": [{"id": "T1", "path": rel_path, "line": 1}],
+            }
+            context = compare.build_audit_context(collected, repo_dir=repo_dir)
+
+            self.assertEqual(context["warnings"], [])
+            self.assertEqual(
+                context["items"][0]["current_code_excerpt"]["snippet"], "1: COMMITTED_CONTENT"
+            )
 
     def test_partially_fixed_without_evidence_or_refs_downgraded_to_uncertain(self) -> None:
         context = {
