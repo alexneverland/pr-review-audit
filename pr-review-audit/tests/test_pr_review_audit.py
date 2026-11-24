@@ -1494,6 +1494,28 @@ class TestAuditScenarios(unittest.TestCase):
                     ctx["warnings"],
                 )
 
+    def test_repo_dir_pins_verified_commit_sha_against_mid_audit_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp) / "repo"
+            head_1 = _init_git_repo(repo_dir, {"src/verify.py": "COMMIT_ONE_CONTENT\n"})
+            (repo_dir / "src" / "verify.py").write_text("COMMIT_TWO_CONTENT\n", encoding="utf-8")
+            _git(repo_dir, "add", "src/verify.py")
+            _git(repo_dir, "commit", "-m", "Second commit")
+            head_2 = _git(repo_dir, "rev-parse", "HEAD")
+
+            _git(repo_dir, "checkout", head_1)
+            warnings: list[str] = []
+            verified_sha = compare._verify_local_repo_head(repo_dir, head_1, warnings)
+            self.assertEqual(verified_sha, head_1)
+
+            # Simulate another process switching branches/commits after verification
+            _git(repo_dir, "checkout", head_2)
+            content = compare._read_local_repo_file(
+                repo_dir, "src/verify.py", warnings, commit_sha=verified_sha
+            )
+            self.assertEqual(content, "COMMIT_ONE_CONTENT\n")
+            self.assertEqual(warnings, [])
+
     def test_partially_fixed_without_evidence_or_refs_downgraded_to_uncertain(self) -> None:
         context = {
             "pr": {
