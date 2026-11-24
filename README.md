@@ -103,6 +103,8 @@ python pr-review-audit/scripts/compare.py /tmp/collected.json --fetch-diffs --fe
 python pr-review-audit/scripts/report.py --context /tmp/audit-context.json --findings /tmp/findings.json --output /tmp/report.md
 ```
 
+When run as a skill, Codex or Claude Code shows a findings table directly in chat and links the full Markdown report. [Example report](pr-review-audit/examples/sample-audit-report.md)
+
 ## Running Tests
 
 All automated tests use mocked `gh api` responses and require no network access or GitHub tokens:

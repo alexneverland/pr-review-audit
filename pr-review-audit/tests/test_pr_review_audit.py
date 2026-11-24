@@ -26,10 +26,11 @@ def _b64(text: str) -> str:
     return base64.b64encode(text.encode("utf-8")).decode("ascii")
 
 
-def _git(repo_dir: Path, *args: str) -> str:
+def _git(repo_dir: Path, *args: str, stdin: str | None = None) -> str:
     proc = subprocess.run(
         ["git", "-c", "core.fsmonitor=false", "-C", str(repo_dir), *args],
         capture_output=True,
+        input=stdin,
         text=True,
         encoding="utf-8",
         shell=False,
@@ -819,6 +820,8 @@ class TestAuditScenarios(unittest.TestCase):
             },
         )
         self.assertIn("| `UNCERTAIN` | 1 |", md)
+        self.assertIn("| Verdict | Finding | Code reference |", md)
+        self.assertIn("| `UNCERTAIN` | Sanitize input &lt;script&gt;evil()&lt;/script&gt; &#124; pipe | — |", md)
         self.assertIn("[UNCERTAIN] `src/app.py`", md)
         self.assertIn("Guardrail downgrade", md)
         self.assertNotIn("<script>", md)
@@ -1515,6 +1518,55 @@ class TestAuditScenarios(unittest.TestCase):
             )
             self.assertEqual(content, "COMMIT_ONE_CONTENT\n")
             self.assertEqual(warnings, [])
+
+    def test_repo_dir_ignores_worktree_symlink_when_reading_pinned_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            repo_dir = root / "repo"
+            rel_path = "src/verify.py"
+            head_sha = _init_git_repo(repo_dir, {rel_path: "COMMITTED_CONTENT\n"})
+            resolve = Path.resolve
+
+            def resolve_worktree_path(path: Path, *args, **kwargs) -> Path:
+                if path == repo_dir / rel_path:
+                    return root / "outside" / "verify.py"
+                return resolve(path, *args, **kwargs)
+
+            collected = {
+                "pr": {"head_sha": head_sha},
+                "files": [{"filename": rel_path}],
+                "review_items": [{"id": "T1", "path": rel_path, "line": 1}],
+            }
+            # Emulate a worktree symlink without requiring Windows symlink privileges.
+            with mock.patch.object(Path, "resolve", autospec=True, side_effect=resolve_worktree_path):
+                context = compare.build_audit_context(collected, repo_dir=repo_dir)
+
+            excerpt = context["items"][0]["current_code_excerpt"]
+            self.assertEqual(excerpt["snippet"], "1: COMMITTED_CONTENT")
+            self.assertEqual(context["warnings"], [])
+
+    def test_repo_dir_reads_drive_prefixed_path_from_git_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp) / "repo"
+            parent = _init_git_repo(repo_dir, {"src/verify.py": "COMMITTED_CONTENT\n"})
+            subtree = _git(repo_dir, "rev-parse", f"{parent}^{{tree}}")
+            # Build a tree object directly because Windows cannot check out a directory named C:.
+            root_tree = _git(repo_dir, "mktree", "-z", stdin=f"040000 tree {subtree}\tC:\0")
+            head_sha = _git(repo_dir, "commit-tree", root_tree, "-p", parent, "-m", "Nested tree")
+            _git(repo_dir, "update-ref", "HEAD", head_sha, parent)
+
+            rel_path = "C:/src/verify.py"
+            collected = {
+                "pr": {"head_sha": head_sha},
+                "files": [{"filename": rel_path}],
+                "review_items": [{"id": "T1", "path": rel_path, "line": 1}],
+            }
+            context = compare.build_audit_context(collected, repo_dir=repo_dir)
+
+            self.assertEqual(context["warnings"], [])
+            self.assertEqual(
+                context["items"][0]["current_code_excerpt"]["snippet"], "1: COMMITTED_CONTENT"
+            )
 
     def test_partially_fixed_without_evidence_or_refs_downgraded_to_uncertain(self) -> None:
         context = {

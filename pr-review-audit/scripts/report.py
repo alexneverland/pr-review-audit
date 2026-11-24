@@ -36,7 +36,7 @@ def sanitize_table_cell(text: Any) -> str:
     """Make untrusted text safe for a single-line GitHub-Flavored Markdown table cell."""
     cleaned = sanitize_markdown_text(text)
     cleaned = re.sub(r"\s+", " ", cleaned)
-    return cleaned.replace("|", "\\|")
+    return cleaned.replace("|", "&#124;")
 
 
 def _safe_markdown_link(label: str, url: Any) -> str:
@@ -282,6 +282,17 @@ def render_markdown_report(
         lines.append(f"| Non-Actionable Items Excluded | {len(non_actionable)} |")
 
     lines.append("")
+
+    if actionable:
+        lines.extend([
+            "| Verdict | Finding | Code reference |",
+            "| --- | --- | --- |",
+        ])
+        for finding in actionable:
+            summary = sanitize_table_cell(finding["issue_summary"])
+            reference = sanitize_table_cell(next(iter(finding["code_references"]), ""))
+            lines.append(f"| `{finding['status']}` | {summary} | {reference or '—'} |")
+        lines.append("")
 
     if resolved_unfixed:
         lines.extend(
