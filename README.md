@@ -4,9 +4,9 @@ Verify whether earlier GitHub pull request findings were fixed in the latest PR 
 
 [Latest release](https://github.com/alexneverland/pr-review-audit/releases/latest) · [Example report](pr-review-audit/examples/sample-audit-report.md) · [MIT License](LICENSE)
 
-![PR Review Audit result from its own PR #1, showing 13 findings and a four-row excerpt with color-coded verdicts](docs/audit-results.png)
+![Rendered PR Review Audit report for PR #1, with the original 13 color-coded findings and code references](docs/audit-results.png)
 
-*Excerpt from a real audit of [this repository’s PR #1](https://github.com/alexneverland/pr-review-audit/pull/1). The verdicts refer to that PR's final commit.*
+*Screenshot of the Markdown report generated for [this repository’s PR #1](https://github.com/alexneverland/pr-review-audit/pull/1). The result is shown in the original language of the audit.*
 
 ## Why PR Review Audit?
 
