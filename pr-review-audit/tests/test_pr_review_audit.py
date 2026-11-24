@@ -442,6 +442,7 @@ class TestAuditScenarios(unittest.TestCase):
             },
         )
         self.assertIn("### 1. [FIXED] `src/auth.py`", md)
+        self.assertIn("| 🟢 `FIXED` |", md)
         self.assertNotIn("Resolved Threads Still Unfixed", md)
 
     def test_scenario_2_resolved_but_issue_still_present(self) -> None:
@@ -506,6 +507,7 @@ class TestAuditScenarios(unittest.TestCase):
         self.assertIn("WARNING — Resolved Threads Still Unfixed", md)
         self.assertIn("Resolved-Thread Discrepancy", md)
         self.assertIn("### 1. [STILL_PRESENT] `src/auth.py`", md)
+        self.assertIn("| 🔴 `STILL_PRESENT` |", md)
         self.assertIn("src/auth.py:3", md)
 
     def test_scenario_3_partially_fixed(self) -> None:
@@ -541,6 +543,7 @@ class TestAuditScenarios(unittest.TestCase):
             },
         )
         self.assertIn("| `PARTIALLY_FIXED` | 1 |", md)
+        self.assertIn("| 🟠 `PARTIALLY_FIXED` |", md)
         self.assertIn("## Findings Requiring Human Verification", md)
         self.assertIn("**[PARTIALLY_FIXED]**", md)
 
@@ -821,7 +824,7 @@ class TestAuditScenarios(unittest.TestCase):
         )
         self.assertIn("| `UNCERTAIN` | 1 |", md)
         self.assertIn("| Verdict | Finding | Code reference |", md)
-        self.assertIn("| `UNCERTAIN` | Sanitize input &lt;script&gt;evil()&lt;/script&gt; &#124; pipe | — |", md)
+        self.assertIn("| 🟠 `UNCERTAIN` | Sanitize input &lt;script&gt;evil()&lt;/script&gt; &#124; pipe | — |", md)
         self.assertIn("[UNCERTAIN] `src/app.py`", md)
         self.assertIn("Guardrail downgrade", md)
         self.assertNotIn("<script>", md)

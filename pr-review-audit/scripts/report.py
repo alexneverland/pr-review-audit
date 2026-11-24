@@ -15,6 +15,12 @@ from typing import Any
 
 
 ALLOWED_STATUSES = ("FIXED", "STILL_PRESENT", "PARTIALLY_FIXED", "UNCERTAIN")
+_STATUS_MARKER = {
+    "FIXED": "🟢",
+    "STILL_PRESENT": "🔴",
+    "PARTIALLY_FIXED": "🟠",
+    "UNCERTAIN": "🟠",
+}
 _STATUS_RANK = {
     "STILL_PRESENT": 0,
     "PARTIALLY_FIXED": 1,
@@ -289,9 +295,10 @@ def render_markdown_report(
             "| --- | --- | --- |",
         ])
         for finding in actionable:
+            status = finding["status"]
             summary = sanitize_table_cell(finding["issue_summary"])
             reference = sanitize_table_cell(next(iter(finding["code_references"]), ""))
-            lines.append(f"| `{finding['status']}` | {summary} | {reference or '—'} |")
+            lines.append(f"| {_STATUS_MARKER[status]} `{status}` | {summary} | {reference or '—'} |")
         lines.append("")
 
     if resolved_unfixed:
