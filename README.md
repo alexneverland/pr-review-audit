@@ -1,8 +1,23 @@
 # PR Review Audit
 
-A lightweight, standalone AI skill that verifies whether issues raised in earlier GitHub Pull Request reviews have **actually been fixed** in the latest commit (`HEAD`).
+Verify whether earlier GitHub pull request findings were fixed in the latest PR commit. Run PR Review Audit as a standalone skill in Codex or Claude Code.
 
-Unlike an AI code reviewer, **PR Review Audit** checks existing review feedback against current code—never equating a modified line, an outdated diff hunk, or a resolved GitHub thread with an actual fix.
+[Latest release](https://github.com/alexneverland/pr-review-audit/releases/latest) · [Example report](pr-review-audit/examples/sample-audit-report.md) · [MIT License](LICENSE)
+
+![PR Review Audit result from its own PR #1, showing 13 findings and a four-row excerpt with color-coded verdicts](docs/audit-results.png)
+
+*Excerpt from a real audit of [this repository’s PR #1](https://github.com/alexneverland/pr-review-audit/pull/1). The verdicts refer to that PR's final commit.*
+
+## Why PR Review Audit?
+
+After a round of fixes, review comments may point to old code, and resolved threads can still describe problems present in the latest commit. Give the skill a PR URL to get a table of existing findings, with a verdict and code evidence for each one. The full Markdown report includes links to the original comments and warnings about missing or outdated evidence.
+
+| Verdict | Meaning |
+| --- | --- |
+| 🟢 `FIXED` | The current code addresses the review concern. |
+| 🟠 `PARTIALLY_FIXED` | Part of the concern still needs work. |
+| 🟠 `UNCERTAIN` | The available evidence is insufficient or runtime verification is needed. |
+| 🔴 `STILL_PRESENT` | The issue remains in the current code. |
 
 ## Architecture
 
@@ -24,13 +39,6 @@ pr-review-audit/
     └── sample-audit-report.md     # Example audit report output
 ```
 
-### Classifications
-
-- `FIXED`: Latest code resolves the underlying concern and edge cases.
-- `STILL_PRESENT`: The underlying issue remains in `HEAD` (highlighted prominently if the GitHub thread was marked resolved).
-- `PARTIALLY_FIXED`: Part of the concern was fixed while another part or edge case remains.
-- `UNCERTAIN`: Static inspection cannot establish fix status (missing file/metadata, heavy rewrite, or runtime-only check).
-
 ### Review Freshness States
 
 - `CURRENT`: Review commit matches PR `HEAD`.
@@ -45,6 +53,13 @@ pr-review-audit/
 - **GitHub CLI (`gh`)** authenticated for the target GitHub or GitHub Enterprise host (`gh auth login`)
 
 ## Installation
+
+Download and extract the [portable skill ZIP](https://github.com/alexneverland/pr-review-audit/releases/latest/download/pr-review-audit.zip), or clone the repository:
+
+```bash
+git clone https://github.com/alexneverland/pr-review-audit.git
+cd pr-review-audit
+```
 
 ### Codex CLI
 
@@ -113,6 +128,10 @@ All automated tests use mocked `gh api` responses and require no network access 
 python -m unittest discover -s pr-review-audit/tests -v
 ```
 
+## Contributing
+
+Fork the repository and open a pull request against `main`. Include an example or a regression test if your change affects an audit verdict, source lookup, or report. See [AGENTS.md](AGENTS.md) for the project checks and scope. GitHub Actions runs the project's required checks on pull requests. A maintainer may need to approve workflow runs from first-time contributors.
+
 ## Security & Reliability
 
 - **Read-only by default:** Only issues GraphQL queries and REST `GET` requests via `gh api`; never modifies source code or posts GitHub comments without explicit permission.
@@ -136,3 +155,7 @@ The `schema_version` (`"1.0"`) JSON boundary between `collect.py`, `compare.py`,
 - Incremental re-auditing & audit history
 - Quick Audit vs. Full Audit modes
 - Optional GitHub PR comment reporting & GitHub Actions integration
+
+## License
+
+[MIT](LICENSE). The portable skill includes a copy of the license.

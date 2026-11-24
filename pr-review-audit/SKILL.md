@@ -91,7 +91,7 @@ Run `report.py` to enforce evidence guardrails (any `FIXED`, `STILL_PRESENT`, or
 python "<SKILL_DIR>/scripts/report.py" --context "<WORK_DIR>/audit-context.json" --findings "<WORK_DIR>/findings.json" --output "<WORK_DIR>/report.md"
 ```
 
-Show the outcome directly in the chat, in the user's language. Give the PR and audited commit, then render a Markdown table outside code fences with one row per actionable finding. Use columns for **Verdict**, **Finding**, and **Evidence**, with a short explanation and the main code reference or review-thread link. Use the final verdicts from the generated report so evidence downgrades are reflected in chat. If there are no actionable findings, say so without an empty table.
+Show the outcome directly in the chat, in the user's language. Give the PR and audited commit, then render a Markdown table outside code fences with one row per actionable finding. Use columns for **Verdict**, **Finding**, and **Evidence**, with a short explanation and the main code reference or review-thread link. Use the final verdicts and markers from the generated report: 🟢 `FIXED`, 🟠 `PARTIALLY_FIXED`, 🟠 `UNCERTAIN`, and 🔴 `STILL_PRESENT`. Keep the status text beside the marker so partial fixes and unverified findings remain distinguishable. If there are no actionable findings, say so without an empty table.
 
 Call out resolved threads whose issues remain `STILL_PRESENT` or `PARTIALLY_FIXED`, and any freshness or evidence gap that affects the outcome. Link the full report after the inline result.
 

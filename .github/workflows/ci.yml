@@ -16,8 +16,11 @@ jobs:
     name: Required checks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.11"
       - name: Compile Python sources
@@ -32,5 +35,11 @@ jobs:
           python -B pr-review-audit/scripts/compare.py --help
           python -B pr-review-audit/scripts/report.py --help
       - name: Check whitespace and conflict markers
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
-          git diff --check
+          if git cat-file -e "${BASE_SHA}^{commit}"; then
+            git diff --check "$BASE_SHA" HEAD
+          else
+            git diff-tree --check --root -r HEAD
+          fi
