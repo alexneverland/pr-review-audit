@@ -744,12 +744,8 @@ def _read_local_repo_file(
 ) -> str | None:
     """Read a committed regular blob at the pinned commit SHA (or HEAD) without Git filters."""
     clean_path = _validate_rel_posix_path(rel_path)
-    if clean_path is None:
+    if clean_path is None or Path(clean_path).drive:
         warnings.append(f"skipped_unsafe_local_path: {rel_path!r}")
-        return None
-    candidate = (repo_root / clean_path).resolve()
-    if not candidate.is_relative_to(repo_root):
-        warnings.append(f"blocked_path_traversal: {rel_path!r}")
         return None
     if commit_sha is not None:
         if not _SHA_RE.fullmatch(commit_sha):
@@ -762,20 +758,19 @@ def _read_local_repo_file(
         warnings.append("repo_dir_partial_clone_unsupported_without_no_lazy_fetch")
         return None
 
-    rc_tree, stdout_tree, _ = _run_git_readonly(
-        repo_root, ["ls-tree", tree_ref, "--", clean_path]
+    # The verified tree defines the path and file type. The worktree can change
+    # after verification, so do not resolve any part of the path through it.
+    rc_tree, stdout_tree, _ = _run_git_readonly_bytes(
+        repo_root, ["--literal-pathspecs", "ls-tree", "-z", tree_ref, "--", clean_path]
     )
     if rc_tree != 0:
         warnings.append(f"local_file_unreadable ({clean_path}): failed to inspect commit tree.")
         return None
-    if not stdout_tree.strip():
+    entry, _, remaining = stdout_tree.partition(b"\0")
+    meta, separator, tree_path = entry.partition(b"\t")
+    if not separator or remaining or tree_path != clean_path.encode("utf-8"):
         return None
-
-    line = stdout_tree.splitlines()[0].strip()
-    if "\t" not in line:
-        return None
-    meta, _tab_path = line.split("\t", 1)
-    parts = meta.split()
+    parts = meta.decode("ascii", errors="replace").split()
     if len(parts) != 3:
         return None
     mode, obj_type, oid = parts

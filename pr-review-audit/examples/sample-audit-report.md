@@ -20,6 +20,13 @@
 | **Total Actionable** | **4** |
 | Non-Actionable Items Excluded | 1 |
 
+| Verdict | Finding | Code reference |
+| --- | --- | --- |
+| `STILL_PRESENT` | The signature check still uses a comparison that can reveal timing information. | src/webhooks/verify.py:48 |
+| `PARTIALLY_FIXED` | Missing TTL expiration and payload-conflict handling for idempotency keys. | src/webhooks/idempotency.py:29-37 |
+| `UNCERTAIN` | The Redis migration's eviction policy still needs verification in staging. | — |
+| `FIXED` | Timestamps older than five minutes are rejected. | src/webhooks/legacy_adapter.py:21-24 |
+
 > **WARNING — Resolved Threads Still Unfixed:** 1 review thread(s) marked as resolved on GitHub still exhibit unfixed or only partially fixed issues in the latest commit:
 >
 > - **STILL_PRESENT** ([PRRT_kwDOExample1](https://github.com/acme/payments/pull/184#discussion_r1001), `src/webhooks/verify.py`): Non-constant-time `==` comparison used on HMAC signature; timing side-channel remains after refactor.

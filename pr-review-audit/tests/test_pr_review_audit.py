@@ -819,6 +819,8 @@ class TestAuditScenarios(unittest.TestCase):
             },
         )
         self.assertIn("| `UNCERTAIN` | 1 |", md)
+        self.assertIn("| Verdict | Finding | Code reference |", md)
+        self.assertIn("| `UNCERTAIN` | Sanitize input &lt;script&gt;evil()&lt;/script&gt; &#124; pipe | — |", md)
         self.assertIn("[UNCERTAIN] `src/app.py`", md)
         self.assertIn("Guardrail downgrade", md)
         self.assertNotIn("<script>", md)
@@ -1515,6 +1517,32 @@ class TestAuditScenarios(unittest.TestCase):
             )
             self.assertEqual(content, "COMMIT_ONE_CONTENT\n")
             self.assertEqual(warnings, [])
+
+    def test_repo_dir_ignores_worktree_symlink_when_reading_pinned_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            repo_dir = root / "repo"
+            rel_path = "src/verify.py"
+            head_sha = _init_git_repo(repo_dir, {rel_path: "COMMITTED_CONTENT\n"})
+            resolve = Path.resolve
+
+            def resolve_worktree_path(path: Path, *args, **kwargs) -> Path:
+                if path == repo_dir / rel_path:
+                    return root / "outside" / "verify.py"
+                return resolve(path, *args, **kwargs)
+
+            collected = {
+                "pr": {"head_sha": head_sha},
+                "files": [{"filename": rel_path}],
+                "review_items": [{"id": "T1", "path": rel_path, "line": 1}],
+            }
+            # Emulate a worktree symlink without requiring Windows symlink privileges.
+            with mock.patch.object(Path, "resolve", autospec=True, side_effect=resolve_worktree_path):
+                context = compare.build_audit_context(collected, repo_dir=repo_dir)
+
+            excerpt = context["items"][0]["current_code_excerpt"]
+            self.assertEqual(excerpt["snippet"], "1: COMMITTED_CONTENT")
+            self.assertEqual(context["warnings"], [])
 
     def test_partially_fixed_without_evidence_or_refs_downgraded_to_uncertain(self) -> None:
         context = {
