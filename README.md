@@ -4,9 +4,9 @@ Verify whether earlier GitHub pull request findings were fixed in the latest PR 
 
 [Latest release](https://github.com/alexneverland/pr-review-audit/releases/latest) · [Example report](pr-review-audit/examples/sample-audit-report.md) · [MIT License](LICENSE)
 
-![Rendered PR Review Audit report for PR #1, with the original 13 color-coded findings and code references](docs/audit-results.png)
+![Actual Codex chat showing four color-coded findings from an audit of PR #1](docs/audit-results.png)
 
-*Screenshot of the Markdown report generated for [this repository’s PR #1](https://github.com/alexneverland/pr-review-audit/pull/1). The result is shown in the original language of the audit.*
+*Screenshot of the table shown in Codex for [this repository’s PR #1](https://github.com/alexneverland/pr-review-audit/pull/1), in the original language of the audit. The full report contains 13 findings.*
 
 ## Why PR Review Audit?
 
@@ -51,6 +51,8 @@ pr-review-audit/
 
 - **Python 3.11+** (standard library only; no `pip install` needed)
 - **GitHub CLI (`gh`)** authenticated for the target GitHub or GitHub Enterprise host (`gh auth login`)
+
+Run the skill in Codex or Claude Code with access to Python and `gh`. The skill has no browser-only runtime. You can read the generated `.md` in a Markdown viewer or render it on GitHub. [Browser-viewable example](pr-review-audit/examples/sample-audit-report.md)
 
 ## Installation
 
