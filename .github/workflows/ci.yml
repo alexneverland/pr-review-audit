@@ -25,7 +25,7 @@ jobs:
           python-version: "3.11"
       - name: Compile Python sources
         run: |
-          python -B -m py_compile pr-review-audit/scripts/__init__.py pr-review-audit/scripts/collect.py pr-review-audit/scripts/compare.py pr-review-audit/scripts/report.py pr-review-audit/tests/test_pr_review_audit.py
+          python -B -m py_compile pr-review-audit/scripts/__init__.py pr-review-audit/scripts/collect.py pr-review-audit/scripts/compare.py pr-review-audit/scripts/incremental.py pr-review-audit/scripts/report.py pr-review-audit/tests/test_pr_review_audit.py
       - name: Run unit tests
         run: |
           python -B -m unittest discover -s pr-review-audit/tests -v

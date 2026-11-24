@@ -11,7 +11,17 @@ import json
 from pathlib import Path
 import re
 import sys
+import tempfile
 from typing import Any
+
+try:
+    from .incremental import (
+        STATE_VERSION, collection_incomplete, is_full_sha, reusable_paths, review_fingerprint,
+    )
+except ImportError:
+    from incremental import (
+        STATE_VERSION, collection_incomplete, is_full_sha, reusable_paths, review_fingerprint,
+    )
 
 
 ALLOWED_STATUSES = ("FIXED", "STILL_PRESENT", "PARTIALLY_FIXED", "UNCERTAIN")
@@ -62,6 +72,22 @@ def validate_and_normalize_findings(
     raw_findings = findings_payload.get("findings")
     if not isinstance(raw_findings, list):
         raise ValueError("`findings` payload must contain a `findings` list.")
+    explicit_ids = {
+        entry["item_id"] for entry in raw_findings
+        if isinstance(entry, dict) and isinstance(entry.get("item_id"), str)
+    }
+    reuse = (context.get("incremental") or {}).get("reused_findings") or {}
+    carried_from = {}
+    raw_findings = list(raw_findings)
+    for item_id, prior in reuse.items():
+        if item_id not in explicit_ids and item_id in items_by_id:
+            finding = prior["finding"]
+            if (
+                finding.get("item_id") == item_id and is_full_sha(prior.get("verified_at_sha"))
+                and reusable_paths(items_by_id[item_id], finding)
+            ):
+                raw_findings.append(finding)
+                carried_from[item_id] = prior["verified_at_sha"]
 
     warnings: list[str] = []
     seen_ids: set[str] = set()
@@ -161,6 +187,10 @@ def validate_and_normalize_findings(
                 "resolved_but_unfixed": resolved_but_unfixed,
                 "guardrail_notes": guardrail_notes,
                 "item": item,
+                "dependency_paths": entry.get("dependency_paths"),
+                "cache_references": raw_refs,
+                "evidence_requires_human": bool(entry.get("requires_human_verification")),
+                "reused_from": carried_from.get(item_id),
             }
         )
 
@@ -195,6 +225,37 @@ def validate_and_normalize_findings(
         )
     )
     return actionable, non_actionable, warnings
+
+
+def build_audit_state(context: dict[str, Any], findings_payload: dict[str, Any]) -> dict[str, Any]:
+    """Save only normalized findings that are eligible for incremental reuse."""
+    pr = context.get("pr") or {}
+    entries = {}
+    actionable, _, _ = validate_and_normalize_findings(context, findings_payload)
+    eligible = [] if collection_incomplete(context.get("warnings", [])) else actionable
+    for finding in eligible:
+        item = finding["item"]
+        saved = {
+            key: finding.get(key) for key in (
+                "item_id", "status", "issue_summary", "evidence",
+                "dependency_paths", "human_verification_reason",
+            )
+        }
+        saved["code_references"] = finding.get("cache_references")
+        saved["requires_human_verification"] = finding.get("evidence_requires_human", False)
+        if reusable_paths(item, saved):
+            entries[finding["item_id"]] = {
+                "finding": saved,
+                "fingerprint": review_fingerprint(item),
+                "verified_at_sha": finding.get("reused_from") or pr.get("head_sha"),
+            }
+    return {
+        "state_version": STATE_VERSION,
+        "pr_url": pr.get("url"),
+        "base_sha": pr.get("base_sha"),
+        "head_sha": pr.get("head_sha"),
+        "entries": entries,
+    }
 
 
 def _format_thread_status(item: dict[str, Any]) -> str:
@@ -289,6 +350,13 @@ def render_markdown_report(
 
     lines.append("")
 
+    if incremental := context.get("incremental"):
+        if reason := incremental.get("fallback_reason"):
+            lines.extend([f"**Incremental fallback.** {sanitize_markdown_text(reason)}", ""])
+        else:
+            reused_count = sum(bool(f.get("reused_from")) for f in actionable)
+            lines.extend([f"**Prior verdicts reused.** {reused_count}", ""])
+
     if actionable:
         lines.extend([
             "| Verdict | Finding | Code reference |",
@@ -298,7 +366,9 @@ def render_markdown_report(
             status = finding["status"]
             summary = sanitize_table_cell(finding["issue_summary"])
             reference = sanitize_table_cell(next(iter(finding["code_references"]), ""))
-            lines.append(f"| {_STATUS_MARKER[status]} `{status}` | {summary} | {reference or '—'} |")
+            origin = finding.get("reused_from")
+            reused = f" · reused from `{sanitize_table_cell(origin[:7])}`" if origin else ""
+            lines.append(f"| {_STATUS_MARKER[status]} `{status}`{reused} | {summary} | {reference or '—'} |")
         lines.append("")
 
     if resolved_unfixed:
@@ -475,6 +545,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--context", required=True, type=Path, help="Path to audit-context.json")
     parser.add_argument("--findings", required=True, type=Path, help="Path to findings.json")
+    parser.add_argument("--save-audit", type=Path, help="Save a baseline for incremental re-audits.")
     parser.add_argument(
         "--output",
         "-o",
@@ -494,6 +565,25 @@ def main(argv: list[str] | None = None) -> int:
         if not isinstance(context, dict) or not isinstance(findings_payload, dict):
             raise ValueError("Both --context and --findings JSON files must have object roots.")
         markdown = render_markdown_report(context, findings_payload)
+        if args.save_audit is not None:
+            destination = args.save_audit.resolve()
+            if any(path is not None and path.resolve() == destination
+                   for path in (args.context, args.findings, args.output)):
+                raise ValueError("--save-audit must be separate from the inputs and report output.")
+            state = build_audit_state(context, findings_payload)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=destination.parent, delete=False
+            ) as temporary:
+                temporary_path = Path(temporary.name)
+                try:
+                    json.dump(state, temporary, indent=2, ensure_ascii=False)
+                    temporary.write("\n")
+                    temporary.close()
+                    temporary_path.replace(destination)
+                finally:
+                    temporary.close()
+                    temporary_path.unlink(missing_ok=True)
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1

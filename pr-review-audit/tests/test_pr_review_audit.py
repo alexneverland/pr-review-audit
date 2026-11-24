@@ -1636,5 +1636,120 @@ class TestAuditScenarios(unittest.TestCase):
         self.assertNotIn("WARNING — Resolved Threads Still Unfixed", md)
 
 
+class TestIncrementalAudit(unittest.TestCase):
+    old_head = "a" * 40
+    new_head = "b" * 40
+    base = "c" * 40
+
+    def collected(self, head):
+        return {
+            "pr": {"url": "https://github.com/acme/app/pull/42", "head_sha": head, "base_sha": self.base},
+            "review_items": [
+                {
+                    "id": item_id,
+                    "source_type": "review_thread",
+                    "path": f"src/{item_id}.py",
+                    "is_resolved": False,
+                    "comments": [{"id": item_id, "body": "Verify the reported behavior."}],
+                }
+                for item_id in ("stable", "dependency", "edited", "uncertain", "untracked")
+            ],
+        }
+
+    def findings(self):
+        entries = [
+            {
+                "item_id": item_id, "status": "FIXED", "issue_summary": f"Check {item_id}.",
+                "evidence": "The matching branch now returns before the operation.",
+                "code_references": [f"src/{item_id}.py:12"],
+                "dependency_paths": [],
+            }
+            for item_id in ("stable", "dependency", "edited", "uncertain", "untracked")
+        ]
+        entries[1]["dependency_paths"] = ["src/permissions.py"]
+        entries[3]["status"] = "UNCERTAIN"
+        del entries[4]["dependency_paths"]
+        return {"findings": entries}
+
+    def comparison(self, files, *, status="ahead", rc=0):
+        router = MockGhRouter()
+        endpoint = f"repos/acme/app/compare/{self.old_head}...{self.new_head}"
+        router.on_rest(endpoint, {
+            "status": status, "merge_base_commit": {"sha": self.old_head}, "files": files,
+        }, rc=rc)
+        return router
+
+    def test_changed_dependency_review_and_new_item_are_rechecked(self) -> None:
+        before = compare.build_audit_context(self.collected(self.old_head))
+        baseline = report.build_audit_state(before, self.findings())
+        after = self.collected(self.new_head)
+        after["review_items"][2]["comments"].append({"id": "reply", "body": "Check the other branch."})
+        after["review_items"].append({"id": "new", "source_type": "issue_comment"})
+        router = self.comparison([{
+            "filename": "src/access.py", "previous_filename": "src/permissions.py", "status": "renamed",
+        }])
+        result = compare.build_audit_context(after, previous_audit=baseline, runner=router)
+        self.assertEqual(set(result["incremental"]["reused_findings"]), {"stable"})
+        self.assertEqual(result["incremental"]["recheck_item_ids"],
+                         ["dependency", "edited", "uncertain", "untracked", "new"])
+        overrides = [row for row in self.findings()["findings"] if row["item_id"] != "stable"]
+        overrides.append({"item_id": "new", "non_actionable": True})
+        payload = {"findings": overrides}
+        markdown = report.render_markdown_report(result, payload)
+        self.assertIn("reused from `aaaaaaa`", markdown)
+        self.assertNotIn("missing_finding_for_item", markdown)
+        next_state = report.build_audit_state(result, payload)
+        self.assertEqual(next_state["head_sha"], self.new_head)
+        self.assertEqual(next_state["entries"]["stable"]["verified_at_sha"], self.old_head)
+        self.assertEqual(next_state["entries"]["dependency"]["verified_at_sha"], self.new_head)
+
+        overrides.append({"item_id": "stable", "status": "UNCERTAIN"})
+        self.assertNotIn("reused from", report.render_markdown_report(result, payload))
+
+    def test_unreliable_comparison_falls_back_to_all_items(self) -> None:
+        before = compare.build_audit_context(self.collected(self.old_head))
+        baseline = report.build_audit_state(before, self.findings())
+        scenarios = (
+            self.comparison([], status="diverged"),
+            self.comparison([], rc=1),
+            self.comparison([{"filename": f"src/file{i}.py"} for i in range(300)]),
+        )
+        for router in scenarios:
+            with self.subTest(router=router):
+                context = compare.build_audit_context(
+                    self.collected(self.new_head), previous_audit=baseline, runner=router,
+                )
+                self.assertEqual(context["incremental"]["reused_findings"], {})
+                self.assertEqual(len(context["incremental"]["recheck_item_ids"]), 5)
+                self.assertIn("fallback_reason", context["incremental"])
+
+        after = self.collected(self.new_head)
+        after["warnings"] = ["thread_comments_incomplete: stable"]
+        router = self.comparison([])
+        context = compare.build_audit_context(after, previous_audit=baseline, runner=router)
+        self.assertIn("fallback_reason", context["incremental"])
+        self.assertEqual(router.calls, [])
+
+    def test_cli_saves_state_and_reuses_it_on_a_second_run(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            work = Path(folder)
+            collected_path, context_path, findings_path, state_path, output_path = [
+                work / name for name in ("collected.json", "context.json", "findings.json", "state.json", "report.md")
+            ]
+            collected_path.write_text(json.dumps(self.collected(self.old_head)), encoding="utf-8")
+            findings_path.write_text(json.dumps(self.findings()), encoding="utf-8")
+            self.assertEqual(compare.main([str(collected_path), "-o", str(context_path)]), 0)
+            report_args = ["--context", str(context_path), "--findings", str(findings_path),
+                           "--save-audit", str(state_path), "-o", str(output_path)]
+            self.assertEqual(report.main(report_args), 0)
+            self.assertEqual(compare.main([str(collected_path), "--previous-audit", str(state_path),
+                                           "-o", str(context_path)]), 0)
+            findings_path.write_text(json.dumps({"findings": self.findings()["findings"][3:]}), encoding="utf-8")
+            self.assertEqual(report.main(report_args), 0)
+            markdown = output_path.read_text(encoding="utf-8")
+            self.assertIn("**Prior verdicts reused.** 3", markdown)
+            self.assertEqual(markdown.count("reused from `aaaaaaa`"), 3)
+
+
 if __name__ == "__main__":
     unittest.main()

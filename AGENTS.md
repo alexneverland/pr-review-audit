@@ -16,7 +16,7 @@ Contributions can come from forks. Open PRs against `main`, keep the required ch
 ## Checks
 
 ```sh
-python -B -m py_compile pr-review-audit/scripts/__init__.py pr-review-audit/scripts/collect.py pr-review-audit/scripts/compare.py pr-review-audit/scripts/report.py pr-review-audit/tests/test_pr_review_audit.py
+python -B -m py_compile pr-review-audit/scripts/__init__.py pr-review-audit/scripts/collect.py pr-review-audit/scripts/compare.py pr-review-audit/scripts/incremental.py pr-review-audit/scripts/report.py pr-review-audit/tests/test_pr_review_audit.py
 python -B -m unittest discover -s pr-review-audit/tests -v
 python -B pr-review-audit/scripts/collect.py --help
 python -B pr-review-audit/scripts/compare.py --help

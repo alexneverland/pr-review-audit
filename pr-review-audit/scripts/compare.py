@@ -21,8 +21,10 @@ from urllib.parse import quote
 
 try:
     from .collect import GhApiError, GhRunner, GitHubClient, run_gh_api
+    from .incremental import plan_reaudit
 except ImportError:
     from collect import GhApiError, GhRunner, GitHubClient, run_gh_api
+    from incremental import plan_reaudit
 
 
 SCHEMA_VERSION = "1.0"
@@ -848,6 +850,7 @@ def build_audit_context(
     fetch_diffs: bool = False,
     fetch_files: bool = False,
     repo_dir: Path | None = None,
+    previous_audit: dict[str, Any] | None = None,
     runner: GhRunner = run_gh_api,
 ) -> dict[str, Any]:
     """Enrich normalized PR data with freshness, rename/move tracking, and code excerpts."""
@@ -858,6 +861,10 @@ def build_audit_context(
     resolved_compare = dict(compare_files_by_sha or {})
     resolved_contents = dict(file_contents_by_path or {})
     client = GitHubClient(runner=runner)
+    incremental = None
+    if previous_audit is not None:
+        incremental = plan_reaudit(pr_data, previous_audit, client)
+    targets = _collect_target_paths(pr_data, rename_map) if fetch_files or repo_dir else []
 
     if fetch_diffs:
         fetched = _fetch_compare_diffs(client, pr_data, warnings)
@@ -871,7 +878,7 @@ def build_audit_context(
         repo = pr.get("repo")
         head_sha = pr.get("head_sha")
         if owner and repo and head_sha:
-            for path in _collect_target_paths(pr_data, rename_map):
+            for path in targets:
                 if path not in resolved_contents:
                     text = _fetch_file_via_gh(
                         client, str(host), str(owner), str(repo), str(head_sha), path, warnings
@@ -884,7 +891,7 @@ def build_audit_context(
         head_sha = (pr_data.get("pr") or {}).get("head_sha")
         verified_head = _verify_local_repo_head(repo_root, head_sha, warnings)
         if verified_head is not None:
-            for path in _collect_target_paths(pr_data, rename_map):
+            for path in targets:
                 if path not in resolved_contents:
                     text = _read_local_repo_file(
                         repo_root, path, warnings, commit_sha=verified_head
@@ -935,7 +942,7 @@ def build_audit_context(
             }
         )
 
-    return {
+    context = {
         "schema_version": SCHEMA_VERSION,
         "pr": pr_data.get("pr") or {},
         "commits": pr_data.get("commits") or [],
@@ -950,6 +957,9 @@ def build_audit_context(
         },
         "warnings": sorted(set(warnings)),
     }
+    if incremental is not None:
+        context["incremental"] = incremental
+    return context
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -974,6 +984,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Optional local repository root for read-only file lookup.",
     )
     parser.add_argument(
+        "--previous-audit",
+        type=Path,
+        help="Reuse eligible findings from a trusted prior audit state saved by report.py.",
+    )
+    parser.add_argument(
         "--output",
         "-o",
         type=Path,
@@ -992,11 +1007,19 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("Collected JSON root must be an object.")
         if args.repo_dir is not None and not args.repo_dir.is_dir():
             raise ValueError(f"--repo-dir does not exist or is not a directory: {args.repo_dir}")
+        previous_audit = None
+        if args.previous_audit is not None:
+            try:
+                saved = json.loads(args.previous_audit.read_text(encoding="utf-8"))
+                previous_audit = saved if isinstance(saved, dict) else {}
+            except (OSError, ValueError):
+                previous_audit = {}
         context = build_audit_context(
             pr_data,
             fetch_diffs=args.fetch_diffs,
             fetch_files=args.fetch_files,
             repo_dir=args.repo_dir,
+            previous_audit=previous_audit,
         )
     except (OSError, ValueError, json.JSONDecodeError, GhApiError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
