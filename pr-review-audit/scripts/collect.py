@@ -458,6 +458,8 @@ def _paginate_thread_comments(
         if not next_cursor or next_cursor == cursor:
             break
         cursor = next_cursor
+    if has_next:
+        warnings.append(f"thread_comments_incomplete: {thread_id}")
     return nodes
 
 

@@ -30,6 +30,7 @@ pr-review-audit/
 │   ├── __init__.py
 │   ├── collect.py                 # Paginated GraphQL + REST collection via `gh api`
 │   ├── compare.py                 # Freshness analysis, rename/moved-code tracking, snapshots
+│   ├── incremental.py             # Evidence tracking and incremental audit planning
 │   └── report.py                  # Guardrail validation, sanitization, Markdown rendering
 ├── references/
 │   └── verification-rules.md      # Classification rubric & prompt-injection defenses
@@ -122,6 +123,14 @@ python pr-review-audit/scripts/report.py --context /tmp/audit-context.json --fin
 
 When run as a skill, Codex or Claude Code shows a findings table directly in chat and links the full Markdown report. [Example report](pr-review-audit/examples/sample-audit-report.md)
 
+## Incremental re-audit
+
+For a PR you audit repeatedly, include `dependency_paths` in conclusive, self-contained inline findings. The list contains every additional file needed to support the verdict. The reviewed path and concrete `path:line` references are tracked automatically.
+
+On the first run, add `--save-audit /path/outside/repo/pr-123-audit.json` to `report.py`. After a push, run `collect.py` again and add `--previous-audit /path/outside/repo/pr-123-audit.json` to `compare.py`. Verify the IDs in `incremental.recheck_item_ids`, then call `report.py` with `--save-audit` again to refresh the baseline. The report shows the original verification commit for each reused verdict. Pass an explicitly reviewed replacement finding to override a reused verdict.
+
+Reuse requires the same PR and base commit, unchanged review discussion, recorded evidence dependencies, and a complete comparison from the previous HEAD. Rebases, unavailable comparisons, and changes to any tracked file trigger re-evaluation. Findings requiring manual or runtime verification always get a fresh check. Keep the audit state private when it contains private PR evidence.
+
 ## Running Tests
 
 All automated tests use mocked `gh api` responses and require no network access or GitHub tokens:
@@ -154,7 +163,7 @@ Fork the repository and open a pull request against `main`. Include an example o
 The `schema_version` (`"1.0"`) JSON boundary between `collect.py`, `compare.py`, and `report.py` is designed to later accommodate:
 - Targeted regression analysis across callers
 - Related test-coverage checks
-- Incremental re-auditing & audit history
+- Browsable audit history
 - Quick Audit vs. Full Audit modes
 - Optional GitHub PR comment reporting & GitHub Actions integration
 
