@@ -694,53 +694,55 @@ def _verify_local_repo_head(
     repo_root: Path,
     head_sha: str | None,
     warnings: list[str],
-) -> bool:
-    """Verify `--repo-dir` is a Git repository root checked out at PR HEAD."""
+) -> str | None:
+    """Verify `--repo-dir` is a Git repository root checked out at PR HEAD and return full SHA."""
     if not head_sha or not _SHA_RE.fullmatch(str(head_sha)):
         warnings.append("repo_dir_skipped_missing_pr_head_sha")
-        return False
+        return None
 
     rc, stdout, _ = _run_git_readonly(repo_root, ["rev-parse", "--is-inside-work-tree"])
     if rc != 0 or stdout.strip().lower() != "true":
         warnings.append("repo_dir_not_a_git_repository")
-        return False
+        return None
 
     rc_top, stdout_top, _ = _run_git_readonly(repo_root, ["rev-parse", "--show-toplevel"])
     if rc_top != 0 or not stdout_top.strip():
         warnings.append("repo_dir_not_a_git_repository")
-        return False
+        return None
     try:
         if Path(stdout_top.strip()).resolve() != repo_root:
             warnings.append("repo_dir_not_git_root")
-            return False
+            return None
     except OSError:
         warnings.append("repo_dir_not_a_git_repository")
-        return False
+        return None
 
     rc_head, stdout_head, _ = _run_git_readonly(repo_root, ["rev-parse", "HEAD"])
     local_head = stdout_head.strip().lower()
     if rc_head != 0 or not _SHA_RE.fullmatch(local_head):
         warnings.append("repo_dir_missing_head_commit")
-        return False
+        return None
 
     pr_head = str(head_sha).strip().lower()
     if not (local_head == pr_head or local_head.startswith(pr_head)):
         warnings.append(f"repo_dir_head_mismatch: local={local_head[:7]} pr={pr_head[:7]}")
-        return False
+        return None
 
     if not _git_supports_no_lazy_fetch() and _is_partial_or_promisor_repo(repo_root):
         warnings.append("repo_dir_partial_clone_unsupported_without_no_lazy_fetch")
-        return False
+        return None
 
-    return True
+    return local_head
 
 
 def _read_local_repo_file(
     repo_root: Path,
     rel_path: str,
     warnings: list[str],
+    *,
+    commit_sha: str | None = None,
 ) -> str | None:
-    """Read a committed regular blob at HEAD without running Git filters."""
+    """Read a committed regular blob at the pinned commit SHA (or HEAD) without Git filters."""
     clean_path = _validate_rel_posix_path(rel_path)
     if clean_path is None:
         warnings.append(f"skipped_unsafe_local_path: {rel_path!r}")
@@ -749,15 +751,22 @@ def _read_local_repo_file(
     if not candidate.is_relative_to(repo_root):
         warnings.append(f"blocked_path_traversal: {rel_path!r}")
         return None
+    if commit_sha is not None:
+        if not _SHA_RE.fullmatch(commit_sha):
+            warnings.append(f"skipped_invalid_commit_sha: {commit_sha!r}")
+            return None
+        tree_ref = commit_sha
+    else:
+        tree_ref = "HEAD"
     if not _git_supports_no_lazy_fetch() and _is_partial_or_promisor_repo(repo_root):
         warnings.append("repo_dir_partial_clone_unsupported_without_no_lazy_fetch")
         return None
 
     rc_tree, stdout_tree, _ = _run_git_readonly(
-        repo_root, ["ls-tree", "HEAD", "--", clean_path]
+        repo_root, ["ls-tree", tree_ref, "--", clean_path]
     )
     if rc_tree != 0:
-        warnings.append(f"local_file_unreadable ({clean_path}): failed to inspect HEAD tree.")
+        warnings.append(f"local_file_unreadable ({clean_path}): failed to inspect commit tree.")
         return None
     if not stdout_tree.strip():
         return None
@@ -879,10 +888,13 @@ def build_audit_context(
     if repo_dir is not None:
         repo_root = repo_dir.resolve(strict=True)
         head_sha = (pr_data.get("pr") or {}).get("head_sha")
-        if _verify_local_repo_head(repo_root, head_sha, warnings):
+        verified_head = _verify_local_repo_head(repo_root, head_sha, warnings)
+        if verified_head is not None:
             for path in _collect_target_paths(pr_data, rename_map):
                 if path not in resolved_contents:
-                    text = _read_local_repo_file(repo_root, path, warnings)
+                    text = _read_local_repo_file(
+                        repo_root, path, warnings, commit_sha=verified_head
+                    )
                     if text is not None:
                         resolved_contents[path] = text
 
